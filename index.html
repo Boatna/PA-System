@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Office PA System</title>
+    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <header>
+        <div>
+            <h1><i class="fas fa-broadcast-tower"></i> PA System</h1>
+            <small>ระบบเสียงตามสาย </small>
+        </div>
+        <div class="time-container">
+            <div id="clock" class="digital-clock">00:00:00</div>
+            <div id="date">Loading...</div>
+        </div>
+    </header>
+
+    <div class="main-grid">
+        <aside class="panel">
+            <h3>MAIN CONTROL</h3>
+            <button id="powerBtn" class="btn btn-power" onclick="toggleSystem()">
+                <i class="fas fa-power-off"></i> <span id="powerText">START SYSTEM</span>
+            </button>
+
+            <div class="volume-control">
+                <label><i class="fas fa-volume-up"></i> ความดัง: <span id="volText">100%</span></label>
+                <input type="range" min="0" max="1" step="0.1" value="1" oninput="setVolume(this.value)">
+            </div>
+
+            <hr>
+            <h3>MANUAL BOARD (ประกาศสด)</h3>
+            <div id="manualBoard" class="manual-list">
+                </div>
+        </aside>
+
+        <main class="panel">
+            <div class="panel-header">
+                <h3>SCHEDULE</h3>
+                <div style="display:flex; gap:5px;">
+                    <button class="btn-sm btn-primary" onclick="addSchedule()">+ เพิ่มเวลา</button>
+                    <button class="btn-sm" onclick="exportData()" title="สำรองข้อมูล (Backup)" style="background:#555; color:white;"><i class="fas fa-download"></i></button>
+                    <button class="btn-sm" onclick="triggerImport()" title="กู้คืนข้อมูล (Restore)" style="background:#555; color:white;"><i class="fas fa-upload"></i></button>
+                    <button class="btn-sm" onclick="hardReset()" title="ล้างค่าทั้งหมด (Reset)" style="background:#ef233c; color:white;"><i class="fas fa-bomb"></i></button>
+                </div>
+            </div>
+            <div id="scheduleContainer" class="schedule-list">
+                </div>
+        </main>
+    </div>
+
+    <audio id="mainAudioPlayer"></audio>
+
+    <script src="script.js"></script>
+</body>
+</html>
