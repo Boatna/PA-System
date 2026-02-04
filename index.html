@@ -3,58 +3,119 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Office PA System</title>
-    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#0a0e1a">
+    <meta name="description" content="ระบบประกาศเสียงอัตโนมัติ - Voice Alarm Pro">
+
+    <title>Voice Alarm Pro</title>
+    
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <div class="bg-animation"></div>
 
     <header>
-        <div>
-            <h1><i class="fas fa-broadcast-tower"></i> PA System</h1>
-            <small>ระบบเสียงตามสาย </small>
+        <div class="header-left">
+            <h1><i class="fas fa-wave-square"></i> Voice Alarm Pro</h1>
+            <div class="subtitle">ระบบประกาศเสียงอัตโนมัติ</div>
         </div>
-        <div class="time-container">
-            <div id="clock" class="digital-clock">00:00:00</div>
-            <div id="date">Loading...</div>
+        <div class="header-center">
+            <div class="digital-clock" id="clock">00:00:00</div>
+            <div class="digital-date" id="date">Loading...</div>
+        </div>
+        <div class="header-right">
+            <div class="status-badge" id="statusBadge">
+                <span class="status-dot"></span>
+                <span id="statusText">STANDBY</span>
+            </div>
         </div>
     </header>
 
-    <div class="main-grid">
-        <aside class="panel">
-            <h3>MAIN CONTROL</h3>
+    <div class="main-container">
+        <aside class="control-panel glass-panel">
+            <div class="panel-header">
+                <h3><i class="fas fa-sliders-h"></i> CONTROL</h3>
+            </div>
+            
             <button id="powerBtn" class="btn btn-power" onclick="toggleSystem()">
-                <i class="fas fa-power-off"></i> <span id="powerText">START SYSTEM</span>
+                <i class="fas fa-power-off"></i>
+                <span id="powerText">START SYSTEM</span>
             </button>
 
-            <div class="volume-control">
-                <label><i class="fas fa-volume-up"></i> ความดัง: <span id="volText">100%</span></label>
-                <input type="range" min="0" max="1" step="0.1" value="1" oninput="setVolume(this.value)">
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <span class="stat-label">รายการ</span>
+                    <span class="stat-value" id="scheduleCount">0</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">เปิดใช้งาน</span>
+                    <span class="stat-value" id="enabledCount">0</span>
+                </div>
             </div>
 
-            <hr>
-            <h3>MANUAL BOARD (ประกาศสด)</h3>
-            <div id="manualBoard" class="manual-list">
+            <div class="volume-box">
+                <div class="volume-header">
+                    <i class="fas fa-volume-up"></i>
+                    <span id="volText">100%</span>
                 </div>
+                <input type="range" id="volumeSlider" min="0" max="1" step="0.01" value="1" oninput="handleVolumeChange(this.value)">
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="manual-section">
+                <h3><i class="fas fa-hand-pointer"></i> MANUAL PLAY</h3>
+                <div id="manualBoard" class="manual-list"></div>
+            </div>
         </aside>
 
-        <main class="panel">
-            <div class="panel-header">
-                <h3>SCHEDULE</h3>
-                <div style="display:flex; gap:5px;">
-                    <button class="btn-sm btn-primary" onclick="addSchedule()">+ เพิ่มเวลา</button>
-                    <button class="btn-sm" onclick="exportData()" title="สำรองข้อมูล (Backup)" style="background:#555; color:white;"><i class="fas fa-download"></i></button>
-                    <button class="btn-sm" onclick="triggerImport()" title="กู้คืนข้อมูล (Restore)" style="background:#555; color:white;"><i class="fas fa-upload"></i></button>
-                    <button class="btn-sm" onclick="hardReset()" title="ล้างค่าทั้งหมด (Reset)" style="background:#ef233c; color:white;"><i class="fas fa-bomb"></i></button>
+        <main class="schedule-panel glass-panel">
+            <div class="panel-top">
+                <div class="next-event-box">
+                    <div class="next-label">NEXT EVENT</div>
+                    <div class="next-value" id="nextSchedule">--:--</div>
+                    <div class="next-countdown" id="nextCountdown">No active schedules</div>
+                </div>
+                
+                <div class="action-buttons">
+                    <button class="btn-icon-text" onclick="addSchedule()">
+                        <i class="fas fa-plus"></i> เพิ่มรายการ
+                    </button>
+                    <button class="btn-icon" onclick="exportData()" title="Backup">
+                        <i class="fas fa-download"></i>
+                    </button>
+                    <button class="btn-icon" onclick="triggerImport()" title="Restore">
+                        <i class="fas fa-upload"></i>
+                    </button>
+                    <button class="btn-icon danger" onclick="confirmReset()" title="Reset All">
+                        <i class="fas fa-trash-alt"></i>
+                    </button>
                 </div>
             </div>
-            <div id="scheduleContainer" class="schedule-list">
-                </div>
+
+            <div id="scheduleContainer" class="schedule-list"></div>
         </main>
     </div>
 
-    <audio id="mainAudioPlayer"></audio>
+    <div id="confirmModal" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-icon warning"><i class="fas fa-exclamation-triangle"></i></div>
+            <h3 id="modalTitle">Confirm Action</h3>
+            <p id="modalMessage">Are you sure?</p>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeModal()">ยกเลิก</button>
+                <button class="btn btn-danger" id="modalConfirmBtn">ยืนยัน</button>
+            </div>
+        </div>
+    </div>
+
+    <audio id="mainAudioPlayer" preload="auto" playsinline webkit-playsinline></audio>
+    <input type="file" id="importFile" accept=".json" style="display: none;">
 
     <script src="script.js"></script>
 </body>
