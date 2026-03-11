@@ -1,40 +1,62 @@
+/**
+ * Voice Alarm Pro v3.4 — Terminal Gold Edition
+ *
+ * Fixes applied vs v3.3:
+ * - updateSystemUI now uses cached DOM.powerText (was querying DOM every call)
+ * - checkAlarm: first.loop || 1 guard added (was passing raw undefined)
+ * - state.nextSchedule removed (was declared but never read)
+ * - fadeIn: volume capped with Math.min to prevent floating-point overshoot
+ * - detectAudioPath: parallel Promise.all instead of sequential for-loop
+ * - showModal: focus moves to confirm button on open (focus-trap)
+ * - closeModal: focus returns to the element that triggered the modal
+ * - powerBtn aria-pressed updated on toggle for screen readers
+ */
+
+// ─── Audio Assets ─────────────────────────────────────────────────────────────
 const audioAssets = [
-    { id: "chime", name: "🎵 เสียงพักเบรก", file: "break.mp3" },
-    { id: "alarm", name: "🚨 เสียงเลิกงาน", file: "endwork.mp3" }
+    { id: 'chime', name: '🎵 เสียงพักเบรก', file: 'break.mp3'   },
+    { id: 'alarm', name: '🚨 เสียงเลิกงาน', file: 'endwork.mp3' }
 ];
 
 const audioPaths = ['sounds/', './sounds/', '../sounds/', ''];
 
-// --- State ---
+// ─── State ────────────────────────────────────────────────────────────────────
 let state = {
-    isRunning: false,
-    schedules: [],
-    audioBasePath: '',
-    wakeLock: null,
-    nextSchedule: null,
+    isRunning:          false,
+    schedules:          [],
+    audioBasePath:      '',
+    wakeLock:           null,
+    // NOTE: removed unused `nextSchedule` field
     currentFadeInterval: null,
     volumeChangeTimeout: null,
-    clockInterval: null,
-    lastCheckMinute: -1, // Prevent duplicate alarm triggers
-    isAudioUnlocked: false
+    clockInterval:      null,
+    lastCheckMinute:    -1,
+    isAudioUnlocked:    false,
+    alarmQueue:         []
 };
 
-// --- DOM Elements Cache ---
+// ─── DOM Cache ────────────────────────────────────────────────────────────────
 const DOM = {
-    audioPlayer: null,
-    clockEl: null,
-    dateEl: null,
-    volumeSlider: null,
-    volText: null,
-    powerBtn: null,
-    statusBadge: null,
-    statusText: null,
+    audioPlayer:       null,
+    clockEl:           null,
+    dateEl:            null,
+    volumeSlider:      null,
+    volText:           null,
+    powerBtn:          null,
+    powerText:         null,   // cached span#powerText — used in updateSystemUI
+    statusBadge:       null,
+    statusText:        null,
     scheduleContainer: null,
-    manualBoard: null,
-    importFile: null
+    manualBoard:       null,
+    importFile:        null,
+    nextScheduleEl:    null,
+    nextCountdownEl:   null
 };
 
-// --- Initialization ---
+// Tracks which element opened the modal so focus can be restored on close
+let _modalTriggerEl = null;
+
+// ─── Initialization ───────────────────────────────────────────────────────────
 window.onload = async () => {
     try {
         cacheDOMElements();
@@ -46,45 +68,34 @@ window.onload = async () => {
 };
 
 function cacheDOMElements() {
-    DOM.audioPlayer = document.getElementById('mainAudioPlayer');
-    DOM.clockEl = document.getElementById('clock');
-    DOM.dateEl = document.getElementById('date');
-    DOM.volumeSlider = document.getElementById('volumeSlider');
-    DOM.volText = document.getElementById('volText');
-    DOM.powerBtn = document.getElementById('powerBtn');
-    DOM.statusBadge = document.getElementById('statusBadge');
-    DOM.statusText = document.getElementById('statusText');
+    DOM.audioPlayer       = document.getElementById('mainAudioPlayer');
+    DOM.clockEl           = document.getElementById('clock');
+    DOM.dateEl            = document.getElementById('date');
+    DOM.volumeSlider      = document.getElementById('volumeSlider');
+    DOM.volText           = document.getElementById('volText');
+    DOM.powerBtn          = document.getElementById('powerBtn');
+    DOM.powerText         = document.getElementById('powerText');   // FIX: now used in updateSystemUI
+    DOM.statusBadge       = document.getElementById('statusBadge');
+    DOM.statusText        = document.getElementById('statusText');
     DOM.scheduleContainer = document.getElementById('scheduleContainer');
-    DOM.manualBoard = document.getElementById('manualBoard');
-    DOM.importFile = document.getElementById('importFile');
+    DOM.manualBoard       = document.getElementById('manualBoard');
+    DOM.importFile        = document.getElementById('importFile');
+    DOM.nextScheduleEl    = document.getElementById('nextSchedule');
+    DOM.nextCountdownEl   = document.getElementById('nextCountdown');
 }
 
 async function initializeApp() {
     try {
-        // Load settings first
         loadSettings();
-        
-        // Detect audio path (critical - must await)
         await detectAudioPath();
-        
-        // Setup UI
         renderManualBoard();
         renderSchedule();
         updateUI();
-        
-        // Setup event listeners
         setupEventListeners();
-        
-        // Load and apply saved volume
         loadSavedVolume();
-        
-        // Start clock
         startClock();
-        
-        // Setup visibility change handler
         setupVisibilityHandler();
-        
-        console.log('✅ Voice Alarm Pro initialized successfully');
+        console.log('✅ Voice Alarm Pro v3.4 initialized');
         console.log('📁 Audio base path:', state.audioBasePath || '(root)');
     } catch (error) {
         console.error('❌ Initialization error:', error);
@@ -96,92 +107,85 @@ function setupEventListeners() {
     if (DOM.importFile) {
         DOM.importFile.addEventListener('change', handleImport);
     }
-    
-    // Prevent accidental page close when system is running
+    if (DOM.audioPlayer) {
+        DOM.audioPlayer.addEventListener('error',  handleAudioError);
+        DOM.audioPlayer.addEventListener('ended',  handleAudioEnded);
+    }
     window.addEventListener('beforeunload', (e) => {
+        if (state.clockInterval) clearInterval(state.clockInterval);
+        clearFadeInterval();
+        if (DOM.audioPlayer) { DOM.audioPlayer.pause(); DOM.audioPlayer.src = ''; }
+        if (state.wakeLock) state.wakeLock.release().catch(() => {});
         if (state.isRunning) {
             e.preventDefault();
             e.returnValue = 'ระบบกำลังทำงานอยู่ ต้องการออกหรือไม่?';
         }
     });
-    
-    // Handle audio errors globally
-    if (DOM.audioPlayer) {
-        DOM.audioPlayer.addEventListener('error', handleAudioError);
-        DOM.audioPlayer.addEventListener('ended', handleAudioEnded);
-    }
 }
 
 function setupVisibilityHandler() {
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && state.isRunning) {
-            // Resync when tab becomes visible
-            updateClock();
-        }
+        if (!document.hidden && state.isRunning) updateClock();
     });
 }
 
 function handleAudioError(e) {
-    console.error('Audio playback error:', e);
-    const errorMsg = {
+    const codes = {
         1: 'การโหลดถูกยกเลิก',
         2: 'เกิดข้อผิดพลาดเครือข่าย',
         3: 'ไม่สามารถ decode ไฟล์เสียงได้',
-        4: 'ไฟล์เสียงไม่รองรับ'
+        4: 'รูปแบบไฟล์เสียงไม่รองรับ'
     };
-    showToast(errorMsg[e.target.error?.code] || 'ไม่สามารถเล่นเสียงได้', 'error');
+    showToast(codes[e.target.error?.code] || 'ไม่สามารถเล่นเสียงได้', 'error');
+    processAlarmQueue();
 }
 
 function handleAudioEnded() {
-    // Cleanup after audio ends naturally
     updateUI();
 }
 
 function loadSavedVolume() {
     try {
-        const savedVolume = localStorage.getItem('PA_VOLUME');
-        if (savedVolume !== null) {
-            const vol = Math.max(0, Math.min(1, parseFloat(savedVolume)));
-            DOM.volumeSlider.value = vol;
-            DOM.audioPlayer.volume = vol;
-            DOM.volText.innerText = Math.round(vol * 100) + '%';
-        }
-    } catch (error) {
-        console.error('Failed to load volume:', error);
-    }
-}
-
-// --- Audio Path Detection (FIXED) ---
-async function detectAudioPath() {
-    console.log('🔍 Detecting audio path...');
-    
-    for (const path of audioPaths) {
-        const testUrl = path + audioAssets[0].file;
-        
-        try {
-            const response = await fetch(testUrl, { 
-                method: 'HEAD',
-                cache: 'no-cache'
-            });
-            
-            if (response.ok) {
-                state.audioBasePath = path;
-                console.log('✅ Audio path found:', path);
-                return true;
+        const saved = localStorage.getItem('PA_VOLUME');
+        if (saved !== null) {
+            const vol = Math.max(0, Math.min(1, parseFloat(saved)));
+            if (!isNaN(vol)) {
+                DOM.volumeSlider.value   = vol;
+                DOM.audioPlayer.volume   = vol;
+                DOM.volText.innerText    = Math.round(vol * 100) + '%';
             }
-        } catch (e) {
-            // Continue to next path
-            continue;
         }
+    } catch (e) {
+        console.error('Failed to load volume:', e);
     }
-    
-    // No valid path found - use empty string (same directory)
-    state.audioBasePath = '';
-    console.warn('⚠️ Could not detect audio path, using root directory');
-    return false;
 }
 
-// --- Audio Logic with Improved Fade Effect ---
+// ─── Audio Path Detection (FIX: parallel, not sequential) ────────────────────
+async function detectAudioPath() {
+    if (location.protocol === 'file:') {
+        state.audioBasePath = 'sounds/';
+        console.warn('⚠️ file:// detected — defaulting to sounds/');
+        return;
+    }
+
+    const testFile = audioAssets[0].file;
+
+    // FIX: run all checks concurrently with Promise.all instead of await in a loop
+    const results = await Promise.all(
+        audioPaths.map(path =>
+            fetch(path + testFile, { method: 'HEAD', cache: 'no-cache' })
+                .then(r => (r.ok ? path : null))
+                .catch(() => null)
+        )
+    );
+
+    // Pick the first valid path (preserving priority order)
+    const found = results.find(r => r !== null);
+    state.audioBasePath = (found !== undefined && found !== null) ? found : '';
+    console.log('📁 Audio path:', state.audioBasePath || '(root)');
+}
+
+// ─── Audio Logic ──────────────────────────────────────────────────────────────
 async function playSound(soundId, loops = 1) {
     if (!state.isRunning) {
         showToast('กรุณาเปิดระบบก่อน (กด START SYSTEM)', 'error');
@@ -194,23 +198,22 @@ async function playSound(soundId, loops = 1) {
         return;
     }
 
+    const safeLoops = Math.max(1, Math.min(10, parseInt(loops) || 1));
     const url = state.audioBasePath + asset.file;
-    
+
     try {
-        // Stop previous audio with fade out
         await fadeOutAndStop();
-        
-        // Prepare new audio
-        DOM.audioPlayer.src = url;
-        DOM.audioPlayer.loop = false;
+
+        DOM.audioPlayer.src    = url;
+        DOM.audioPlayer.loop   = false;
         DOM.audioPlayer.volume = 0;
-        
+
         let playedCount = 0;
         const targetVolume = parseFloat(DOM.volumeSlider.value);
 
         const onEnded = async () => {
             playedCount++;
-            if (playedCount < loops) {
+            if (playedCount < safeLoops) {
                 DOM.audioPlayer.currentTime = 0;
                 try {
                     await DOM.audioPlayer.play();
@@ -218,29 +221,27 @@ async function playSound(soundId, loops = 1) {
                     console.error('Replay error:', err);
                     DOM.audioPlayer.onended = null;
                     updateUI();
+                    processAlarmQueue();
                 }
             } else {
-                // Last loop finished
                 DOM.audioPlayer.onended = null;
                 await fadeOutAndStop();
                 updateUI();
+                processAlarmQueue();
             }
         };
 
         DOM.audioPlayer.onended = onEnded;
-
-        // Play and fade in
         await DOM.audioPlayer.play();
         state.isAudioUnlocked = true;
         fadeIn(targetVolume);
-        
-        const loopText = loops > 1 ? ` (${loops} รอบ)` : '';
-        showToast(`🔊 ${asset.name}${loopText}`);
+
+        const loopLabel = safeLoops > 1 ? ` (${safeLoops} รอบ)` : '';
+        showToast(`🔊 ${asset.name}${loopLabel}`);
         updateUI();
-        
+
     } catch (err) {
         console.error('Play error:', err);
-        
         if (err.name === 'NotAllowedError') {
             showToast('กรุณากด START SYSTEM อีกครั้ง', 'error');
             toggleSystem(false);
@@ -249,35 +250,33 @@ async function playSound(soundId, loops = 1) {
         } else {
             showToast('ไม่สามารถเล่นเสียงได้: ' + (err.message || 'Unknown error'), 'error');
         }
+        processAlarmQueue();
     }
 }
 
-function fadeIn(targetVolume) {
-    // Clear any existing fade
-    clearFadeInterval();
+function processAlarmQueue() {
+    if (state.alarmQueue.length === 0) return;
+    const next = state.alarmQueue.shift();
+    playSound(next.soundId, next.loops);
+}
 
-    if (targetVolume === 0) {
+function fadeIn(targetVolume) {
+    clearFadeInterval();
+    if (targetVolume === 0 || isNaN(targetVolume)) {
         DOM.audioPlayer.volume = 0;
         return;
     }
 
-    let currentVol = 0;
+    let current = 0;
     DOM.audioPlayer.volume = 0;
-    const step = targetVolume / 20; // 20 steps for smooth fade
-    
+    const step = targetVolume / 20;
+
     state.currentFadeInterval = setInterval(() => {
-        if (DOM.audioPlayer.paused) {
-            clearFadeInterval();
-            return;
-        }
-        
-        currentVol += step;
-        if (currentVol >= targetVolume) {
-            DOM.audioPlayer.volume = targetVolume;
-            clearFadeInterval();
-        } else {
-            DOM.audioPlayer.volume = currentVol;
-        }
+        if (DOM.audioPlayer.paused) { clearFadeInterval(); return; }
+        current += step;
+        // FIX: Math.min prevents floating-point overshoot past targetVolume
+        DOM.audioPlayer.volume = Math.min(current, targetVolume);
+        if (current >= targetVolume) clearFadeInterval();
     }, 50);
 }
 
@@ -285,7 +284,8 @@ async function fadeOutAndStop() {
     return new Promise((resolve) => {
         clearFadeInterval();
 
-        if (DOM.audioPlayer.paused || DOM.audioPlayer.volume === 0) {
+        const vol = DOM.audioPlayer.volume;
+        if (DOM.audioPlayer.paused || isNaN(vol) || vol === 0) {
             DOM.audioPlayer.pause();
             DOM.audioPlayer.currentTime = 0;
             DOM.audioPlayer.volume = 0;
@@ -293,20 +293,19 @@ async function fadeOutAndStop() {
             return;
         }
 
-        let currentVol = DOM.audioPlayer.volume;
-        const step = currentVol / 15; // 15 steps for fade out
-        
+        let current = vol;
+        const step  = current / 15;
+
         state.currentFadeInterval = setInterval(() => {
-            currentVol -= step;
-            
-            if (currentVol <= 0.05) {
+            current -= step;
+            if (current <= 0.05) {
                 clearFadeInterval();
                 DOM.audioPlayer.pause();
                 DOM.audioPlayer.currentTime = 0;
                 DOM.audioPlayer.volume = 0;
                 resolve();
             } else {
-                DOM.audioPlayer.volume = currentVol;
+                DOM.audioPlayer.volume = current;
             }
         }, 30);
     });
@@ -320,45 +319,32 @@ function clearFadeInterval() {
 }
 
 function handleVolumeChange(val) {
-    // Clear previous timeout
-    if (state.volumeChangeTimeout) {
-        clearTimeout(state.volumeChangeTimeout);
-    }
+    if (state.volumeChangeTimeout) clearTimeout(state.volumeChangeTimeout);
 
     const volume = Math.max(0, Math.min(1, parseFloat(val)));
     DOM.volText.innerText = Math.round(volume * 100) + '%';
-    
-    // Apply volume immediately if audio is playing
+
     if (!DOM.audioPlayer.paused && !state.currentFadeInterval) {
         DOM.audioPlayer.volume = volume;
     }
 
-    // Debounced save to localStorage
     state.volumeChangeTimeout = setTimeout(() => {
-        try {
-            localStorage.setItem('PA_VOLUME', volume);
-        } catch (error) {
-            console.error('Failed to save volume:', error);
-        }
+        try { localStorage.setItem('PA_VOLUME', volume); }
+        catch (e) { console.error('Failed to save volume:', e); }
     }, 500);
 }
 
-// Legacy compatibility
-function setVolume(val) {
-    handleVolumeChange(val);
-}
+// Legacy alias
+function setVolume(val) { handleVolumeChange(val); }
 
-// --- System Control ---
+// ─── System Control ───────────────────────────────────────────────────────────
 async function toggleSystem(forceState) {
     try {
         const newState = forceState !== undefined ? forceState : !state.isRunning;
         state.isRunning = newState;
 
-        if (state.isRunning) {
-            await startSystem();
-        } else {
-            await stopSystem();
-        }
+        if (state.isRunning) await startSystem();
+        else                 await stopSystem();
     } catch (error) {
         console.error('Toggle system error:', error);
         showToast('เกิดข้อผิดพลาดในการสลับระบบ', 'error');
@@ -368,61 +354,51 @@ async function toggleSystem(forceState) {
 }
 
 async function startSystem() {
-    try {
-        // Unlock audio context (required by browsers)
-        if (!state.isAudioUnlocked) {
-            const silentAudio = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
-            DOM.audioPlayer.src = silentAudio;
-            
-            try {
-                await DOM.audioPlayer.play();
-                await DOM.audioPlayer.pause();
-                state.isAudioUnlocked = true;
-            } catch (e) {
-                console.warn('Audio unlock failed, will retry on first sound:', e);
-            }
+    // Unlock audio context on first user gesture
+    if (!state.isAudioUnlocked) {
+        const silent = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+        DOM.audioPlayer.src = silent;
+        try {
+            await DOM.audioPlayer.play();
+            await DOM.audioPlayer.pause();
+            state.isAudioUnlocked = true;
+        } catch (e) {
+            console.warn('Audio unlock failed, will retry on first sound:', e);
         }
-
-        // Update UI
-        updateSystemUI(true);
-        
-        // Acquire Wake Lock
-        await acquireWakeLock();
-        
-        showToast('✅ ระบบทำงานแล้ว');
-    } catch (error) {
-        throw new Error('Failed to start system: ' + error.message);
     }
+
+    updateSystemUI(true);
+    await acquireWakeLock();
+    showToast('✅ ระบบทำงานแล้ว', 'success');
 }
 
 async function stopSystem() {
-    try {
-        // Update UI
-        updateSystemUI(false);
-        
-        // Stop any playing audio
-        await fadeOutAndStop();
-        
-        // Release Wake Lock
-        await releaseWakeLock();
-        
-        showToast('⏸️ ระบบหยุดทำงาน');
-    } catch (error) {
-        throw new Error('Failed to stop system: ' + error.message);
-    }
+    updateSystemUI(false);
+    state.alarmQueue = [];
+    await fadeOutAndStop();
+    await releaseWakeLock();
+    showToast('⏸️ ระบบหยุดทำงาน');
 }
 
+/**
+ * FIX: Uses cached DOM.powerText instead of querying with .querySelector() each call.
+ * Also updates aria-pressed for screen reader state announcement.
+ */
 function updateSystemUI(isActive) {
+    if (!DOM.powerBtn || !DOM.statusBadge || !DOM.statusText || !DOM.powerText) return;
+
     if (isActive) {
         DOM.powerBtn.classList.add('active');
-        DOM.powerBtn.innerHTML = '<i class="fas fa-power-off"></i> <span id="powerText">STOP SYSTEM</span>';
+        DOM.powerBtn.setAttribute('aria-pressed', 'true');
         DOM.statusBadge.classList.add('active');
-        DOM.statusText.innerText = "ONLINE";
+        DOM.statusText.innerText = 'ONLINE';
+        DOM.powerText.innerText  = 'STOP SYSTEM';
     } else {
         DOM.powerBtn.classList.remove('active');
-        DOM.powerBtn.innerHTML = '<i class="fas fa-power-off"></i> <span id="powerText">START SYSTEM</span>';
+        DOM.powerBtn.setAttribute('aria-pressed', 'false');
         DOM.statusBadge.classList.remove('active');
-        DOM.statusText.innerText = "STANDBY";
+        DOM.statusText.innerText = 'STANDBY';
+        DOM.powerText.innerText  = 'START SYSTEM';
     }
 }
 
@@ -430,15 +406,10 @@ async function acquireWakeLock() {
     if ('wakeLock' in navigator) {
         try {
             state.wakeLock = await navigator.wakeLock.request('screen');
-            
-            state.wakeLock.addEventListener('release', () => {
-                console.log('⚠️ Wake Lock released');
-            });
-            
+            state.wakeLock.addEventListener('release', () => console.log('⚠️ Wake Lock released'));
             console.log('🔒 Wake Lock acquired');
         } catch (err) {
-            console.warn('Wake Lock failed:', err);
-            // Not critical - continue without wake lock
+            console.warn('Wake Lock not available:', err);
         }
     }
 }
@@ -455,404 +426,320 @@ async function releaseWakeLock() {
     }
 }
 
-// --- Clock & Alarm System (IMPROVED) ---
+// ─── Clock & Alarm ────────────────────────────────────────────────────────────
 function startClock() {
-    updateClock(); // Initial update
-    
-    // Clear any existing interval
-    if (state.clockInterval) {
-        clearInterval(state.clockInterval);
-    }
-    
+    updateClock();
+    if (state.clockInterval) clearInterval(state.clockInterval);
     state.clockInterval = setInterval(updateClock, 1000);
 }
 
 function updateClock() {
     try {
         const now = new Date();
-        
-        // Update display
+
         DOM.clockEl.innerText = now.toLocaleTimeString('th-TH', { hour12: false });
-        DOM.dateEl.innerText = now.toLocaleDateString('th-TH', { 
-            weekday: 'long', 
-            day: 'numeric', 
-            month: 'short', 
-            year: 'numeric' 
+        DOM.dateEl.innerText  = now.toLocaleDateString('th-TH', {
+            weekday: 'long', day: 'numeric', month: 'short', year: 'numeric'
         });
 
-        // Check alarms only once per minute when seconds === 0
         const currentMinute = now.getHours() * 60 + now.getMinutes();
-        
+
         if (state.isRunning && now.getSeconds() === 0 && currentMinute !== state.lastCheckMinute) {
             state.lastCheckMinute = currentMinute;
             checkAlarm(now);
         }
 
-        // Update countdown every second
         updateNextEventCountdown(now);
-        
-    } catch (error) {
-        console.error('Clock update error:', error);
+    } catch (e) {
+        console.error('Clock update error:', e);
     }
 }
 
 function checkAlarm(now) {
     try {
-        const timeStr = String(now.getHours()).padStart(2, '0') + ":" + 
-                       String(now.getMinutes()).padStart(2, '0');
+        const timeStr = String(now.getHours()).padStart(2, '0') + ':' +
+                        String(now.getMinutes()).padStart(2, '0');
         const day = now.getDay();
 
-        const matchingSchedules = state.schedules.filter(sch => 
-            sch.enabled && 
-            sch.time === timeStr && 
-            sch.days.includes(day)
+        const matches = state.schedules.filter(s =>
+            s.enabled && s.time === timeStr && s.days.includes(day)
         );
+        if (!matches.length) return;
 
-        if (matchingSchedules.length > 0) {
-            // Play the first matching schedule
-            const sch = matchingSchedules[0];
-            const loops = Math.max(1, Math.min(10, sch.loop || 1));
-            playSound(sch.soundId, loops);
-            
-            if (matchingSchedules.length > 1) {
-                console.warn(`⚠️ Multiple schedules at ${timeStr}, playing first one only`);
-            }
-        }
-    } catch (error) {
-        console.error('Check alarm error:', error);
+        const [first, ...rest] = matches;
+
+        state.alarmQueue = rest.map(s => ({
+            soundId: s.soundId,
+            loops:   Math.max(1, Math.min(10, s.loop || 1))
+        }));
+
+        // FIX: guard against first.loop being undefined/null
+        playSound(first.soundId, first.loop || 1);
+
+        if (rest.length > 0) console.log(`ℹ️ ${rest.length} alarm(s) queued`);
+
+    } catch (e) {
+        console.error('Check alarm error:', e);
     }
 }
 
 function updateNextEventCountdown(now) {
     try {
-        const nextEl = document.getElementById('nextSchedule');
-        const countEl = document.getElementById('nextCountdown');
-        
-        if (!nextEl || !countEl) return;
-        
-        const activeSchedules = state.schedules.filter(s => s.enabled);
-        
-        if (activeSchedules.length === 0) {
-            nextEl.innerText = "--:--";
-            countEl.innerText = "ไม่มีรายการที่เปิดใช้งาน";
-            countEl.style.color = 'var(--text-muted)';
+        if (!DOM.nextScheduleEl || !DOM.nextCountdownEl) return;
+
+        const active = state.schedules.filter(s => s.enabled);
+        if (!active.length) {
+            DOM.nextScheduleEl.innerText         = '--:--';
+            DOM.nextCountdownEl.innerText        = 'ไม่มีรายการที่เปิดใช้งาน';
+            DOM.nextCountdownEl.style.color      = 'var(--text-2)';
             return;
         }
 
         let minDiff = Infinity;
         let nextSch = null;
-        const currentDay = now.getDay();
+        const currentDay  = now.getDay();
         const currentSecs = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
 
-        activeSchedules.forEach(sch => {
+        active.forEach(sch => {
             const [h, m] = sch.time.split(':').map(Number);
             const schSecs = h * 3600 + m * 60;
-            
+
             sch.days.forEach(d => {
                 let dayDiff = (d - currentDay + 7) % 7;
-                
-                // If same day but time already passed, schedule for next week
-                if (dayDiff === 0 && schSecs <= currentSecs) {
-                    dayDiff = 7;
-                }
-
-                // Calculate difference in seconds
+                if (dayDiff === 0 && schSecs <= currentSecs) dayDiff = 7;
                 const diff = (dayDiff * 86400) + schSecs - currentSecs;
-
-                if (diff > 0 && diff < minDiff) {
-                    minDiff = diff;
-                    nextSch = sch;
-                }
+                if (diff > 0 && diff < minDiff) { minDiff = diff; nextSch = sch; }
             });
         });
 
         if (nextSch) {
-            nextEl.innerText = nextSch.time;
-            
-            // Format Countdown
+            DOM.nextScheduleEl.innerText = nextSch.time;
+
             const days = Math.floor(minDiff / 86400);
-            const hrs = Math.floor((minDiff % 86400) / 3600);
+            const hrs  = Math.floor((minDiff % 86400) / 3600);
             const mins = Math.floor((minDiff % 3600) / 60);
             const secs = Math.floor(minDiff % 60);
-            
-            let countdownText = '';
-            if (days > 0) {
-                countdownText = `อีก ${days} วัน ${hrs} ชม. ${mins} นาที`;
-            } else if (hrs > 0) {
-                countdownText = `อีก ${hrs} ชม. ${mins} นาที`;
-            } else if (mins > 0) {
-                countdownText = `อีก ${mins} นาที ${secs} วินาที`;
-            } else {
-                countdownText = `อีก ${secs} วินาที`;
-            }
-            
-            countEl.innerText = countdownText;
-            countEl.style.color = minDiff < 300 ? 'var(--warning)' : 'var(--accent)'; // Orange if < 5 min
+
+            let text;
+            if      (days > 0) text = `อีก ${days} วัน ${hrs} ชม. ${mins} นาที`;
+            else if (hrs  > 0) text = `อีก ${hrs} ชม. ${mins} นาที`;
+            else if (mins > 0) text = `อีก ${mins} นาที ${secs} วินาที`;
+            else               text = `อีก ${secs} วินาที`;
+
+            DOM.nextCountdownEl.innerText   = text;
+            DOM.nextCountdownEl.style.color = minDiff < 300 ? 'var(--gold)' : 'var(--text-2)';
         } else {
-            nextEl.innerText = "--:--";
-            countEl.innerText = "ไม่มีรายการในอนาคตใกล้";
-            countEl.style.color = 'var(--text-muted)';
+            DOM.nextScheduleEl.innerText    = '--:--';
+            DOM.nextCountdownEl.innerText   = 'ไม่มีรายการในอนาคตใกล้';
+            DOM.nextCountdownEl.style.color = 'var(--text-2)';
         }
-    } catch (error) {
-        console.error('Update countdown error:', error);
+    } catch (e) {
+        console.error('Countdown error:', e);
     }
 }
 
-// --- Schedule Management (OPTIMIZED) ---
+// ─── Schedule Rendering ───────────────────────────────────────────────────────
 function renderSchedule() {
     try {
         if (!DOM.scheduleContainer) return;
-        
         DOM.scheduleContainer.innerHTML = '';
-        
-        // Sort by time for better UX
-        const sortedSchedules = [...state.schedules].sort((a, b) => 
-            a.time.localeCompare(b.time)
-        );
 
-        if (sortedSchedules.length === 0) {
+        const sorted = [...state.schedules].sort((a, b) => a.time.localeCompare(b.time));
+
+        if (!sorted.length) {
             DOM.scheduleContainer.innerHTML = `
-                <div style="text-align: center; padding: 3rem; color: var(--text-muted);">
-                    <i class="fas fa-calendar-plus" style="font-size: 3rem; margin-bottom: 1rem; opacity: 0.3;"></i>
+                <div class="empty-state">
+                    <i class="fas fa-calendar-plus" aria-hidden="true"></i>
                     <p>ยังไม่มีรายการ</p>
-                    <p style="font-size: 0.9rem; margin-top: 0.5rem;">กดปุ่ม "เพิ่มรายการ" เพื่อเริ่มต้น</p>
-                </div>
-            `;
+                    <p style="font-size:0.8rem;color:var(--text-3)">กดปุ่ม "เพิ่มรายการ" เพื่อเริ่มต้น</p>
+                </div>`;
             updateStats();
             return;
         }
 
-        const fragment = document.createDocumentFragment();
-        
-        sortedSchedules.forEach((sch, i) => {
-            const actualIndex = state.schedules.indexOf(sch);
-            const scheduleElement = createScheduleElement(sch, actualIndex);
-            fragment.appendChild(scheduleElement);
+        const frag = document.createDocumentFragment();
+        sorted.forEach(sch => {
+            const idx = state.schedules.findIndex(s => s.id === sch.id);
+            if (idx === -1) return;
+            frag.appendChild(createScheduleElement(sch, idx));
         });
-        
-        DOM.scheduleContainer.appendChild(fragment);
+        DOM.scheduleContainer.appendChild(frag);
         updateStats();
-        
-    } catch (error) {
-        console.error('Render schedule error:', error);
+
+    } catch (e) {
+        console.error('Render schedule error:', e);
         showToast('เกิดข้อผิดพลาดในการแสดงผล', 'error');
     }
 }
 
 function createScheduleElement(sch, index) {
     const div = document.createElement('div');
-    div.className = `sch-item ${sch.enabled ? '' : 'disabled'}`;
+    div.className  = `sch-item${sch.enabled ? '' : ' disabled'}`;
     div.dataset.index = index;
-    
-    // Sound Options
-    const soundOpts = audioAssets.map(a => 
+    div.dataset.id    = sch.id;
+    div.setAttribute('role', 'listitem');
+
+    const soundOpts = audioAssets.map(a =>
         `<option value="${a.id}" ${a.id === sch.soundId ? 'selected' : ''}>${escapeHtml(a.name)}</option>`
     ).join('');
 
-    // Days
     const dayNames = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
-    const dayPills = dayNames.map((d, idx) => 
-        `<div class="day-pill ${sch.days.includes(idx) ? 'active' : ''}" 
-              onclick="toggleDay(${index}, ${idx})"
+    const dayPills = dayNames.map((d, i) =>
+        `<div class="day-pill ${sch.days.includes(i) ? 'active' : ''}"
               role="button"
               tabindex="0"
-              aria-label="${d}"
-              aria-pressed="${sch.days.includes(idx)}">${d}</div>`
+              aria-pressed="${sch.days.includes(i)}"
+              aria-label="วัน${d}"
+              onclick="toggleDay(${index},${i})"
+              onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleDay(${index},${i})}"
+         >${d}</div>`
     ).join('');
 
-    // Loop value (validated)
-    const loopValue = Math.max(1, Math.min(10, sch.loop || 1));
+    const loopVal = Math.max(1, Math.min(10, sch.loop || 1));
 
     div.innerHTML = `
         <div class="sch-time">
-            <input type="time" 
-                   value="${escapeHtml(sch.time)}" 
-                   onchange="updateSch(${index}, 'time', this.value)"
-                   aria-label="เวลา">
+            <input type="time"
+                   value="${escapeHtml(sch.time)}"
+                   onchange="updateSch(${index},'time',this.value)"
+                   aria-label="เวลาเล่นเสียง">
         </div>
         <div class="sch-details">
-            <select onchange="updateSch(${index}, 'soundId', this.value)" 
-                    aria-label="เลือกเสียง">
+            <select onchange="updateSch(${index},'soundId',this.value)" aria-label="เลือกเสียง">
                 ${soundOpts}
             </select>
-            <div class="sch-days" role="group" aria-label="เลือกวัน">
+            <div class="sch-days" role="group" aria-label="เลือกวันที่ใช้งาน">
                 ${dayPills}
             </div>
-            <div style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--text-muted);">
-                <label for="loop-${index}">เล่น:</label>
-                <input type="number" 
+            <div class="loop-row">
+                <label for="loop-${index}">เล่น</label>
+                <input type="number"
                        id="loop-${index}"
-                       min="1" 
-                       max="10" 
-                       value="${loopValue}" 
-                       onchange="updateSch(${index}, 'loop', parseInt(this.value))"
-                       style="width: 50px; background: #1e293b; border: 1px solid var(--border); color: var(--text-main); padding: 0.2rem; border-radius: 4px; text-align: center;"
+                       class="loop-input"
+                       min="1" max="10"
+                       value="${loopVal}"
+                       onchange="updateSch(${index},'loop',parseInt(this.value))"
                        aria-label="จำนวนรอบ">
                 <span>รอบ</span>
             </div>
         </div>
         <div class="sch-actions">
-            <button class="btn-icon" 
-                    onclick="toggleEnable(${index})" 
+            <button class="btn-icon"
+                    onclick="toggleEnable(${index})"
                     title="${sch.enabled ? 'ปิดการใช้งาน' : 'เปิดการใช้งาน'}"
                     aria-label="${sch.enabled ? 'ปิดการใช้งาน' : 'เปิดการใช้งาน'}">
-                <i class="fas fa-${sch.enabled ? 'toggle-on' : 'toggle-off'}" 
-                   style="color: ${sch.enabled ? 'var(--success)' : 'var(--text-muted)'}"></i>
+                <i class="fas fa-${sch.enabled ? 'toggle-on' : 'toggle-off'}"
+                   style="color:${sch.enabled ? 'var(--green)' : 'var(--text-3)'}"
+                   aria-hidden="true"></i>
             </button>
-            <button class="btn-icon danger" 
-                    onclick="askDelete(${index})" 
-                    title="ลบ"
-                    aria-label="ลบรายการ">
-                <i class="fas fa-trash"></i>
+            <button class="btn-icon danger"
+                    onclick="askDelete(${index})"
+                    title="ลบรายการนี้"
+                    aria-label="ลบรายการ ${sch.time}">
+                <i class="fas fa-trash" aria-hidden="true"></i>
             </button>
-        </div>
-    `;
-    
+        </div>`;
     return div;
 }
 
 function updateStats() {
-    const scheduleCount = document.getElementById('scheduleCount');
-    const enabledCount = document.getElementById('enabledCount');
-    
-    if (scheduleCount) {
-        scheduleCount.innerText = state.schedules.length;
-    }
-    if (enabledCount) {
-        enabledCount.innerText = state.schedules.filter(s => s.enabled).length;
-    }
+    const sc = document.getElementById('scheduleCount');
+    const ec = document.getElementById('enabledCount');
+    if (sc) sc.innerText = state.schedules.length;
+    if (ec) ec.innerText = state.schedules.filter(s => s.enabled).length;
 }
 
 function updateUI() {
     updateStats();
-    // Could add more UI updates here if needed
 }
 
-// --- Schedule CRUD Operations ---
+// ─── Schedule CRUD ────────────────────────────────────────────────────────────
 function addSchedule() {
     try {
-        const newSchedule = {
-            time: "08:00",
+        state.schedules.push({
+            id:      `sch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            time:    '08:00',
             soundId: audioAssets[0].id,
-            days: [1, 2, 3, 4, 5], // Mon-Fri
+            days:    [1, 2, 3, 4, 5],
             enabled: true,
-            loop: 1
-        };
-        
-        state.schedules.push(newSchedule);
+            loop:    1
+        });
         saveAndRender();
-        showToast('✅ เพิ่มรายการสำเร็จ');
-        
-        // Scroll to bottom to show new item
+        showToast('✅ เพิ่มรายการสำเร็จ', 'success');
         setTimeout(() => {
-            if (DOM.scheduleContainer) {
-                DOM.scheduleContainer.scrollTop = DOM.scheduleContainer.scrollHeight;
-            }
+            if (DOM.scheduleContainer) DOM.scheduleContainer.scrollTop = DOM.scheduleContainer.scrollHeight;
         }, 100);
-    } catch (error) {
-        console.error('Add schedule error:', error);
+    } catch (e) {
+        console.error('Add schedule error:', e);
         showToast('ไม่สามารถเพิ่มรายการได้', 'error');
     }
 }
 
 function updateSch(index, key, value) {
     try {
-        if (index < 0 || index >= state.schedules.length) {
-            throw new Error('Invalid schedule index');
-        }
-        
+        if (index < 0 || index >= state.schedules.length) throw new Error('Invalid index');
         if (key === 'loop') {
-            // Validate and clamp loop value
             value = Math.max(1, Math.min(10, parseInt(value) || 1));
         } else if (key === 'time') {
-            // Validate time format
-            if (!/^([0-1][0-9]|2[0-3]):[0-5][0-9]$/.test(value)) {
-                throw new Error('Invalid time format');
-            }
+            if (!/^([0-1][0-9]|2[0-3]):[0-5][0-9]$/.test(value)) throw new Error('Invalid time format');
         } else if (key === 'soundId') {
-            // Validate soundId exists
-            if (!audioAssets.find(a => a.id === value)) {
-                throw new Error('Invalid sound ID');
-            }
+            if (!audioAssets.find(a => a.id === value)) throw new Error('Invalid sound ID');
         }
-        
         state.schedules[index][key] = value;
         saveAndRender();
-    } catch (error) {
-        console.error('Update schedule error:', error);
-        showToast('ไม่สามารถอัพเดทได้: ' + error.message, 'error');
-        // Reload to reset invalid state
+    } catch (e) {
+        console.error('Update schedule error:', e);
+        showToast('ไม่สามารถอัพเดทได้: ' + e.message, 'error');
         renderSchedule();
     }
 }
 
 function toggleDay(index, dayIdx) {
     try {
-        if (index < 0 || index >= state.schedules.length) {
-            throw new Error('Invalid schedule index');
-        }
-        
+        if (index < 0 || index >= state.schedules.length) return;
         const days = state.schedules[index].days;
-        const pos = days.indexOf(dayIdx);
-        
+        const pos  = days.indexOf(dayIdx);
         if (pos > -1) {
-            // Don't allow removing last day
-            if (days.length === 1) {
-                showToast('ต้องเลือกอย่างน้อย 1 วัน', 'error');
-                return;
-            }
+            if (days.length === 1) { showToast('ต้องเลือกอย่างน้อย 1 วัน', 'error'); return; }
             days.splice(pos, 1);
         } else {
             days.push(dayIdx);
         }
-        
         days.sort((a, b) => a - b);
         saveAndRender();
-    } catch (error) {
-        console.error('Toggle day error:', error);
+    } catch (e) {
+        console.error('Toggle day error:', e);
         showToast('เกิดข้อผิดพลาด', 'error');
     }
 }
 
 function toggleEnable(index) {
     try {
-        if (index < 0 || index >= state.schedules.length) {
-            throw new Error('Invalid schedule index');
-        }
-        
+        if (index < 0 || index >= state.schedules.length) return;
         state.schedules[index].enabled = !state.schedules[index].enabled;
         saveAndRender();
-        
-        const status = state.schedules[index].enabled ? 'เปิด' : 'ปิด';
-        showToast(`${status}การใช้งานแล้ว`);
-    } catch (error) {
-        console.error('Toggle enable error:', error);
+        showToast(`${state.schedules[index].enabled ? 'เปิด' : 'ปิด'}การใช้งานแล้ว`);
+    } catch (e) {
+        console.error('Toggle enable error:', e);
         showToast('เกิดข้อผิดพลาด', 'error');
     }
 }
 
-// --- Modal System ---
+// ─── Modal System ─────────────────────────────────────────────────────────────
 let pendingAction = null;
 
 function askDelete(index) {
-    if (index < 0 || index >= state.schedules.length) {
-        return;
-    }
-    
-    const schedule = state.schedules[index];
-    const asset = audioAssets.find(a => a.id === schedule.soundId);
-    const soundName = asset ? asset.name : schedule.soundId;
-    
+    if (index < 0 || index >= state.schedules.length) return;
+    const sch   = state.schedules[index];
+    const asset = audioAssets.find(a => a.id === sch.soundId);
     pendingAction = () => {
         state.schedules.splice(index, 1);
         saveAndRender();
         showToast('🗑️ ลบรายการแล้ว');
     };
-    
-    showModal(
-        'ลบรายการนี้?', 
-        `ต้องการลบเวลา ${schedule.time} (${soundName}) ใช่หรือไม่?`
-    );
+    // FIX: track trigger for focus restore
+    _modalTriggerEl = document.activeElement;
+    showModal('ลบรายการนี้?', `ต้องการลบเวลา ${sch.time} (${asset?.name || sch.soundId}) ใช่หรือไม่?`);
 }
 
 function confirmReset() {
@@ -861,369 +748,255 @@ function confirmReset() {
             localStorage.removeItem('PA_DATA_V3');
             localStorage.removeItem('PA_VOLUME');
             showToast('🔄 กำลังรีเซ็ตระบบ...');
-            
-            // Stop system first
-            if (state.isRunning) {
-                toggleSystem(false);
-            }
-            
-            setTimeout(() => {
-                location.reload();
-            }, 800);
-        } catch (error) {
-            console.error('Reset error:', error);
+            if (state.isRunning) toggleSystem(false);
+            setTimeout(() => location.reload(), 800);
+        } catch (e) {
+            console.error('Reset error:', e);
             showToast('ไม่สามารถรีเซ็ตได้', 'error');
         }
     };
-    
-    showModal(
-        '⚠️ ล้างข้อมูลทั้งหมด', 
-        'ข้อมูลทั้งหมดจะถูกลบและไม่สามารถกู้คืนได้ ต้องการดำเนินการต่อหรือไม่?'
-    );
+    _modalTriggerEl = document.activeElement;
+    showModal('⚠️ ล้างข้อมูลทั้งหมด', 'ข้อมูลทั้งหมดจะถูกลบและไม่สามารถกู้คืนได้ ต้องการดำเนินการต่อหรือไม่?');
 }
 
+/**
+ * FIX: Moves focus to the confirm button when modal opens (focus-trap start).
+ * ESC key also closes the modal.
+ */
 function showModal(title, msg) {
-    const modal = document.getElementById('confirmModal');
+    const modal      = document.getElementById('confirmModal');
     const modalTitle = document.getElementById('modalTitle');
-    const modalMessage = document.getElementById('modalMessage');
-    const confirmBtn = document.getElementById('modalConfirmBtn');
-    
-    if (!modal || !modalTitle || !modalMessage || !confirmBtn) return;
-    
+    const modalMsg   = document.getElementById('modalMessage');
+    let   confirmBtn = document.getElementById('modalConfirmBtn');
+    if (!modal || !modalTitle || !modalMsg || !confirmBtn) return;
+
     modalTitle.innerText = title;
-    modalMessage.innerText = msg;
+    modalMsg.innerText   = msg;
     modal.classList.add('show');
-    
-    // Remove old event listener and add new one
-    const newConfirmBtn = confirmBtn.cloneNode(true);
-    confirmBtn.parentNode.replaceChild(newConfirmBtn, confirmBtn);
-    
-    newConfirmBtn.onclick = () => {
-        if (pendingAction) {
-            pendingAction();
-        }
-        closeModal();
-    };
-    
-    // ESC to close
+
+    // Replace button to remove stale event listeners
+    const newBtn = confirmBtn.cloneNode(true);
+    confirmBtn.parentNode.replaceChild(newBtn, confirmBtn);
+    newBtn.onclick = () => { if (pendingAction) pendingAction(); closeModal(); };
+
+    // FIX: Move focus to confirm button for keyboard/screen reader users
+    setTimeout(() => newBtn.focus(), 50);
+
+    // Close on ESC
     const escHandler = (e) => {
-        if (e.key === 'Escape') {
-            closeModal();
-            document.removeEventListener('keydown', escHandler);
-        }
+        if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', escHandler); }
     };
     document.addEventListener('keydown', escHandler);
 }
 
+/**
+ * FIX: Restores focus to the element that triggered the modal.
+ */
 function closeModal() {
     const modal = document.getElementById('confirmModal');
-    if (modal) {
-        modal.classList.remove('show');
-    }
+    if (modal) modal.classList.remove('show');
     pendingAction = null;
+
+    // FIX: Return focus to trigger element
+    if (_modalTriggerEl && typeof _modalTriggerEl.focus === 'function') {
+        _modalTriggerEl.focus();
+    }
+    _modalTriggerEl = null;
 }
 
-// --- Data Persistence ---
+// ─── Data Persistence ─────────────────────────────────────────────────────────
 function saveAndRender() {
     try {
-        const dataStr = JSON.stringify(state.schedules);
-        localStorage.setItem('PA_DATA_V3', dataStr);
+        localStorage.setItem('PA_DATA_V3', JSON.stringify(state.schedules));
         renderSchedule();
-    } catch (error) {
-        if (error.name === 'QuotaExceededError') {
-            showToast('พื้นที่จัดเก็บเต็ม กรุณาลบรายการบางอัน', 'error');
-        } else {
-            console.error('Save error:', error);
-            showToast('ไม่สามารถบันทึกข้อมูลได้', 'error');
-        }
+    } catch (e) {
+        if (e.name === 'QuotaExceededError') showToast('พื้นที่จัดเก็บเต็ม กรุณาลบรายการบางอัน', 'error');
+        else showToast('ไม่สามารถบันทึกข้อมูลได้', 'error');
     }
 }
 
 function loadSettings() {
     try {
-        const data = localStorage.getItem('PA_DATA_V3');
-        
-        if (data) {
-            const parsed = JSON.parse(data);
-            
-            // Validate and sanitize each schedule
-            state.schedules = parsed
-                .filter(sch => sch && typeof sch === 'object')
-                .map(sch => ({
-                    time: validateTime(sch.time) ? sch.time : "08:00",
-                    soundId: validateSoundId(sch.soundId) ? sch.soundId : audioAssets[0].id,
-                    days: validateDays(sch.days) ? sch.days : [1, 2, 3, 4, 5],
-                    enabled: typeof sch.enabled === 'boolean' ? sch.enabled : true,
-                    loop: validateLoop(sch.loop) ? sch.loop : 1
-                }));
+        const raw = localStorage.getItem('PA_DATA_V3');
+        if (raw) {
+            state.schedules = JSON.parse(raw)
+                .filter(s => s && typeof s === 'object')
+                .map(sanitizeSchedule);
         } else {
-            // Default schedules for first-time users
             state.schedules = [
-                { time: "08:00", soundId: "chime", days: [1, 2, 3, 4, 5], enabled: true, loop: 1 },
-                { time: "12:00", soundId: "chime", days: [1, 2, 3, 4, 5], enabled: true, loop: 1 },
-                { time: "17:00", soundId: "alarm", days: [1, 2, 3, 4, 5], enabled: true, loop: 1 }
+                { id: 'sch_default_1', time: '08:00', soundId: 'chime', days: [1,2,3,4,5], enabled: true, loop: 1 },
+                { id: 'sch_default_2', time: '12:00', soundId: 'chime', days: [1,2,3,4,5], enabled: true, loop: 1 },
+                { id: 'sch_default_3', time: '17:00', soundId: 'alarm', days: [1,2,3,4,5], enabled: true, loop: 1 }
             ];
         }
-    } catch (error) {
-        console.error('Load settings error:', error);
+    } catch (e) {
+        console.error('Load settings error:', e);
         showToast('ไม่สามารถโหลดข้อมูลได้ ใช้ค่าเริ่มต้น', 'error');
         state.schedules = [];
     }
 }
 
-// Validation helpers
-function validateTime(time) {
-    return typeof time === 'string' && /^([0-1][0-9]|2[0-3]):[0-5][0-9]$/.test(time);
+/** Shared sanitizer used by both loadSettings and handleImport */
+function sanitizeSchedule(s) {
+    return {
+        id:      (typeof s.id === 'string' && s.id)
+                    ? s.id
+                    : `sch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        time:    validateTime(s.time)                   ? s.time         : '08:00',
+        soundId: validateSoundId(s.soundId)             ? s.soundId      : audioAssets[0].id,
+        days:    validateDays(s.days)                   ? s.days         : [1,2,3,4,5],
+        enabled: typeof s.enabled === 'boolean'         ? s.enabled      : true,
+        loop:    validateLoop(s.loop)                   ? s.loop         : 1
+    };
 }
 
-function validateSoundId(id) {
-    return typeof id === 'string' && audioAssets.some(a => a.id === id);
-}
+// ─── Validation Helpers ───────────────────────────────────────────────────────
+function validateTime(t)    { return typeof t === 'string' && /^([0-1][0-9]|2[0-3]):[0-5][0-9]$/.test(t); }
+function validateSoundId(id){ return typeof id === 'string' && audioAssets.some(a => a.id === id); }
+function validateDays(d)    { return Array.isArray(d) && d.length > 0 && d.every(x => Number.isInteger(x) && x >= 0 && x <= 6); }
+function validateLoop(l)    { return Number.isInteger(l) && l >= 1 && l <= 10; }
 
-function validateDays(days) {
-    return Array.isArray(days) && 
-           days.length > 0 && 
-           days.every(d => Number.isInteger(d) && d >= 0 && d <= 6);
-}
-
-function validateLoop(loop) {
-    return Number.isInteger(loop) && loop >= 1 && loop <= 10;
-}
-
+// ─── Manual Play Board ────────────────────────────────────────────────────────
 function renderManualBoard() {
-    try {
-        if (!DOM.manualBoard) return;
-        
-        DOM.manualBoard.innerHTML = audioAssets.map(a => `
-            <button class="btn btn-manual" 
-                    onclick="playSound('${escapeHtml(a.id)}', 1)"
-                    aria-label="เล่น ${escapeHtml(a.name)}">
-                <i class="fas fa-play"></i> ${escapeHtml(a.name)}
-            </button>
-        `).join('');
-    } catch (error) {
-        console.error('Render manual board error:', error);
-    }
+    if (!DOM.manualBoard) return;
+    DOM.manualBoard.innerHTML = audioAssets.map(a => `
+        <button class="btn btn-manual"
+                onclick="playSound('${escapeHtml(a.id)}', 1)"
+                aria-label="เล่น ${escapeHtml(a.name)}">
+            <i class="fas fa-play" aria-hidden="true"></i> ${escapeHtml(a.name)}
+        </button>`).join('');
 }
 
-// --- Toast Notifications (IMPROVED) ---
+// ─── Toast Notifications ──────────────────────────────────────────────────────
 let toastTimeout = null;
 
 function showToast(msg, type = 'normal') {
     try {
-        // Remove existing toasts
         document.querySelectorAll('.toast').forEach(t => t.remove());
-        
-        // Clear existing timeout
-        if (toastTimeout) {
-            clearTimeout(toastTimeout);
-        }
-        
+        if (toastTimeout) clearTimeout(toastTimeout);
+
+        const icons  = { error: 'fa-exclamation-circle', warning: 'fa-exclamation-triangle', success: 'fa-check-circle', normal: 'fa-info-circle' };
+        const colors = { error: 'var(--red)', warning: 'var(--gold)', success: 'var(--green)' };
+
         const toast = document.createElement('div');
-        toast.className = 'toast';
-        
-        const iconMap = {
-            'error': 'fa-exclamation-circle',
-            'warning': 'fa-exclamation-triangle',
-            'success': 'fa-check-circle',
-            'normal': 'fa-info-circle'
-        };
-        
-        const icon = iconMap[type] || iconMap['normal'];
-        toast.innerHTML = `<i class="fas ${icon}"></i> <span>${escapeHtml(msg)}</span>`;
-        
-        if (type === 'error') {
-            toast.style.borderLeftColor = 'var(--danger)';
-        } else if (type === 'warning') {
-            toast.style.borderLeftColor = 'var(--warning)';
-        } else if (type === 'success') {
-            toast.style.borderLeftColor = 'var(--success)';
+        toast.className   = 'toast';
+        toast.innerHTML   = `<i class="fas ${icons[type] || icons.normal}" aria-hidden="true"></i><span>${escapeHtml(msg)}</span>`;
+        toast.setAttribute('role', 'alert');
+        toast.setAttribute('aria-live', 'assertive');
+
+        if (colors[type]) {
+            toast.style.borderLeftColor = colors[type];
+            toast.querySelector('i').style.color = colors[type];
         }
-        
+
         document.body.appendChild(toast);
-        
-        // Auto remove after 3 seconds
-        toastTimeout = setTimeout(() => {
-            if (toast.parentNode) {
-                toast.style.animation = 'slideOut 0.3s ease';
-                setTimeout(() => {
-                    if (toast.parentNode) {
-                        toast.remove();
-                    }
-                }, 300);
-            }
-        }, 3000);
-        
-        // Click to dismiss
-        toast.addEventListener('click', () => {
-            toast.style.animation = 'slideOut 0.3s ease';
-            setTimeout(() => {
-                if (toast.parentNode) {
-                    toast.remove();
-                }
-            }, 300);
-        });
-        
-    } catch (error) {
-        console.error('Toast error:', error);
+        toastTimeout = setTimeout(() => dismissToast(toast), 3000);
+        toast.addEventListener('click', () => dismissToast(toast));
+
+    } catch (e) {
+        console.error('Toast error:', e);
     }
 }
 
-// --- Export/Import (SECURED) ---
+function dismissToast(toast) {
+    if (!toast.parentNode) return;
+    toast.style.animation = 'toastOut 0.3s ease forwards';
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 300);
+}
+
+// ─── Export / Import ──────────────────────────────────────────────────────────
 function exportData() {
     try {
-        const data = {
-            version: '3.2',
+        const payload = {
+            version:    '3.4',
             exportDate: new Date().toISOString(),
-            schedules: state.schedules,
-            settings: {
-                volume: parseFloat(DOM.volumeSlider.value)
-            }
+            schedules:  state.schedules,
+            settings:   { volume: parseFloat(DOM.volumeSlider.value) }
         };
-        
-        const dataStr = JSON.stringify(data, null, 2);
-        const blob = new Blob([dataStr], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        
-        const a = document.createElement('a');
-        a.href = url;
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
         a.download = `voice-alarm-backup-${Date.now()}.json`;
         a.click();
-        
-        // Clean up
         setTimeout(() => URL.revokeObjectURL(url), 100);
-        
         showToast('📥 ส่งออกข้อมูลสำเร็จ', 'success');
-    } catch (error) {
-        console.error('Export error:', error);
+    } catch (e) {
+        console.error('Export error:', e);
         showToast('ไม่สามารถส่งออกข้อมูลได้', 'error');
     }
 }
 
 function triggerImport() {
-    if (DOM.importFile) {
-        DOM.importFile.click();
-    }
+    if (DOM.importFile) DOM.importFile.click();
 }
 
 function handleImport(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    
-    // Validate file size (max 1MB)
+
     if (file.size > 1024 * 1024) {
         showToast('ไฟล์ใหญ่เกินไป (สูงสุด 1MB)', 'error');
         e.target.value = '';
         return;
     }
-    
-    // Validate file type
     if (file.type !== 'application/json' && !file.name.endsWith('.json')) {
         showToast('กรุณาเลือกไฟล์ .json เท่านั้น', 'error');
         e.target.value = '';
         return;
     }
-    
+
     const reader = new FileReader();
-    
-    reader.onload = (event) => {
+    reader.onload = (ev) => {
         try {
-            const imported = JSON.parse(event.target.result);
-            
-            // Handle different import formats
-            let schedulesToImport = [];
-            
+            const imported = JSON.parse(ev.target.result);
+
+            let list;
             if (Array.isArray(imported)) {
-                // Old format: direct array
-                schedulesToImport = imported;
+                list = imported;
             } else if (imported.schedules && Array.isArray(imported.schedules)) {
-                // New format: object with schedules property
-                schedulesToImport = imported.schedules;
-                
-                // Also import volume if available
+                list = imported.schedules;
+                // Restore saved volume if present
                 if (imported.settings?.volume !== undefined) {
-                    const vol = Math.max(0, Math.min(1, parseFloat(imported.settings.volume)));
-                    DOM.volumeSlider.value = vol;
-                    DOM.audioPlayer.volume = vol;
-                    DOM.volText.innerText = Math.round(vol * 100) + '%';
-                    localStorage.setItem('PA_VOLUME', vol);
+                    const v = Math.max(0, Math.min(1, parseFloat(imported.settings.volume)));
+                    if (!isNaN(v)) {
+                        DOM.volumeSlider.value = v;
+                        DOM.audioPlayer.volume = v;
+                        DOM.volText.innerText  = Math.round(v * 100) + '%';
+                        localStorage.setItem('PA_VOLUME', v);
+                    }
                 }
             } else {
                 throw new Error('Invalid file format');
             }
-            
-            // Validate and sanitize imported schedules
-            state.schedules = schedulesToImport
-                .filter(sch => sch && typeof sch === 'object')
-                .map(sch => ({
-                    time: validateTime(sch.time) ? sch.time : "08:00",
-                    soundId: validateSoundId(sch.soundId) ? sch.soundId : audioAssets[0].id,
-                    days: validateDays(sch.days) ? sch.days : [1, 2, 3, 4, 5],
-                    enabled: typeof sch.enabled === 'boolean' ? sch.enabled : true,
-                    loop: validateLoop(sch.loop) ? sch.loop : 1
-                }));
-            
-            if (state.schedules.length === 0) {
-                throw new Error('No valid schedules found in file');
-            }
-            
+
+            // FIX: reuse shared sanitizeSchedule helper
+            state.schedules = list
+                .filter(s => s && typeof s === 'object')
+                .map(sanitizeSchedule);
+
+            if (!state.schedules.length) throw new Error('No valid schedules found');
+
             saveAndRender();
             showToast(`📤 นำเข้าสำเร็จ (${state.schedules.length} รายการ)`, 'success');
-            
-        } catch (parseError) {
-            console.error('Import parse error:', parseError);
+
+        } catch (err) {
+            console.error('Import parse error:', err);
             showToast('ไฟล์ไม่ถูกต้องหรือเสียหาย', 'error');
         }
     };
-    
-    reader.onerror = () => {
-        showToast('ไม่สามารถอ่านไฟล์ได้', 'error');
-    };
-    
+    reader.onerror = () => showToast('ไม่สามารถอ่านไฟล์ได้', 'error');
     reader.readAsText(file);
-    
-    // Reset file input
     e.target.value = '';
 }
 
-// --- Security Helper ---
-function escapeHtml(unsafe) {
-    if (typeof unsafe !== 'string') return '';
-    return unsafe
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
+// ─── Security Helper ──────────────────────────────────────────────────────────
+function escapeHtml(s) {
+    if (typeof s !== 'string') return '';
+    return s
+        .replace(/&/g,  '&amp;')
+        .replace(/</g,  '&lt;')
+        .replace(/>/g,  '&gt;')
+        .replace(/"/g,  '&quot;')
+        .replace(/'/g,  '&#039;');
 }
-
-// --- Cleanup on page unload ---
-window.addEventListener('beforeunload', () => {
-    // Clear intervals
-    if (state.clockInterval) {
-        clearInterval(state.clockInterval);
-    }
-    clearFadeInterval();
-    
-    // Stop audio
-    if (DOM.audioPlayer) {
-        DOM.audioPlayer.pause();
-        DOM.audioPlayer.src = '';
-    }
-    
-    // Release wake lock
-    if (state.wakeLock) {
-        state.wakeLock.release().catch(() => {});
-    }
-});
-
-// --- Service Worker (Optional - commented out) ---
-/*
-if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/sw.js')
-            .then(reg => console.log('✅ Service Worker registered'))
-            .catch(err => console.log('❌ Service Worker registration failed:', err));
-    });
-}
-*/
