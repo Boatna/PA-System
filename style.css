@@ -1,15 +1,8 @@
 /* ════════════════════════════════════════════
-   Voice Alarm Pro v3.4 — Terminal Gold Edition
+   Voice Alarm Pro v3.5 — GitHub Pages Edition
    ════════════════════════════════════════════
-   Fixes applied:
-   - Removed @import (fonts loaded via <link> in HTML)
-   - Added -webkit-mask-image for Safari
-   - Added -webkit-backdrop-filter everywhere it's needed
-   - Scoped h1 to .brand-title (was global selector)
-   - Removed unused --gold-dim variable
-   - Fixed outline pattern using :focus:not(:focus-visible)
-   - Added .btn base style used by renderManualBoard()
-   - Removed duplicate .loop-row label rule
+   Changes vs v3.4:
+   - เพิ่ม .unlock-hint component (แสดงก่อน START)
    ════════════════════════════════════════════ */
 
 /* ─── Variables ─────────────────────────────────────────────── */
@@ -61,7 +54,7 @@ body {
     line-height: 1.6;
 }
 
-/* ─── Base Button (used by JS-rendered elements) ─────────────── */
+/* ─── Base Button ────────────────────────────────────────────── */
 .btn {
     border: none;
     cursor: pointer;
@@ -84,7 +77,6 @@ body {
         linear-gradient(rgba(245, 166, 35, 0.04) 1px, transparent 1px),
         linear-gradient(90deg, rgba(245, 166, 35, 0.04) 1px, transparent 1px);
     background-size: 48px 48px;
-    /* FIX: Added -webkit- prefix for Safari */
     -webkit-mask-image: radial-gradient(ellipse at 50% 0%, black 30%, transparent 80%);
     mask-image: radial-gradient(ellipse at 50% 0%, black 30%, transparent 80%);
 }
@@ -128,7 +120,6 @@ header {
     padding: 0 2rem;
     background: rgba(10, 8, 4, 0.9);
     border-bottom: 1px solid var(--border-2);
-    /* FIX: Added -webkit- prefix for Safari */
     -webkit-backdrop-filter: blur(16px);
     backdrop-filter: blur(16px);
 }
@@ -157,7 +148,6 @@ header {
 
 .header-left { display: flex; align-items: center; }
 
-/* FIX: Scoped to .brand-title — was global h1 selector */
 .brand-title {
     font-family: 'Bebas Neue', sans-serif;
     font-size: 1.5rem;
@@ -319,6 +309,31 @@ header {
     box-shadow: inset 0 0 30px rgba(245, 166, 35, 0.05);
 }
 
+/* ─── Unlock Hint ────────────────────────────────────────────── */
+/* แสดงแนะนำ user ก่อนกด START — ซ่อนหลัง start */
+.unlock-hint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0.6rem 0.9rem;
+    background: rgba(245, 166, 35, 0.05);
+    border: 1px dashed rgba(245, 166, 35, 0.25);
+    border-radius: var(--r);
+    font-size: 0.72rem;
+    color: var(--text-3);
+    line-height: 1.4;
+    animation: hintPulse 3s ease-in-out infinite;
+}
+.unlock-hint i {
+    color: var(--gold);
+    flex-shrink: 0;
+    font-size: 0.8rem;
+}
+@keyframes hintPulse {
+    0%, 100% { border-color: rgba(245, 166, 35, 0.25); }
+    50%       { border-color: rgba(245, 166, 35, 0.5); }
+}
+
 /* Stats */
 .stats-grid {
     display: grid;
@@ -414,7 +429,6 @@ input[type="range"]::-moz-range-thumb {
     box-shadow: 0 0 10px var(--gold-glow);
     cursor: pointer;
 }
-/* FIX: use :focus:not(:focus-visible) to hide outline for mouse, show for keyboard */
 input[type="range"]:focus:not(:focus-visible) { outline: none; }
 input[type="range"]:focus-visible {
     outline: 2px solid var(--gold);
@@ -451,7 +465,6 @@ input[type="range"]:focus-visible {
 .manual-list::-webkit-scrollbar-track { background: transparent; }
 .manual-list::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 2px; }
 
-/* .btn base class + .btn-manual modifier */
 .btn-manual {
     width: 100%;
     padding: 0.75rem 1rem;
@@ -659,7 +672,6 @@ input[type="range"]:focus-visible {
 .sch-time input[type="time"]:focus {
     color: var(--gold);
 }
-/* FIX: Proper outline pattern for keyboard vs mouse */
 .sch-time input[type="time"]:focus:not(:focus-visible) { outline: none; }
 .sch-time input[type="time"]:focus-visible {
     outline: 2px solid var(--gold);
@@ -686,7 +698,6 @@ input[type="range"]:focus-visible {
     transition: border-color 0.2s;
 }
 .sch-details select:hover { border-color: var(--gold); }
-/* FIX: Proper outline pattern for select */
 .sch-details select:focus:not(:focus-visible) { outline: none; }
 .sch-details select:focus-visible {
     outline: none;
@@ -734,7 +745,6 @@ input[type="range"]:focus-visible {
     align-items: center;
     gap: 0.5rem;
     font-size: 0.75rem;
-    /* FIX: removed duplicate label rule; color set on parent */
     color: var(--text-3);
 }
 .loop-input {
@@ -780,7 +790,6 @@ input[type="range"]:focus-visible {
     position: fixed;
     inset: 0;
     background: rgba(10, 8, 4, 0.85);
-    /* FIX: Added -webkit- prefix for Safari */
     -webkit-backdrop-filter: blur(8px);
     backdrop-filter: blur(8px);
     z-index: 1000;
@@ -870,10 +879,9 @@ input[type="range"]:focus-visible {
     gap: 0.75rem;
     animation: toastIn 0.3s ease;
     cursor: pointer;
-    max-width: 360px;
+    max-width: 380px;
     font-size: 0.88rem;
     color: var(--text);
-    /* FIX: Added -webkit- prefix for Safari */
     -webkit-backdrop-filter: blur(8px);
     backdrop-filter: blur(8px);
 }
@@ -893,7 +901,7 @@ input[type="range"]:focus-visible {
     to   { opacity: 1; }
 }
 
-/* ─── Global Focus Styles (keyboard navigation) ──────────────── */
+/* ─── Global Focus Styles ────────────────────────────────────── */
 button:focus-visible,
 select:focus-visible,
 [role="button"]:focus-visible {
@@ -926,11 +934,12 @@ select:focus-visible,
         flex-direction: row;
         flex-wrap: wrap;
     }
-    .panel-label { width: 100%; }
+    .panel-label  { width: 100%; }
     .btn-power,
+    .unlock-hint,
     .stats-grid,
     .volume-panel,
-    .rule { width: 100%; }
+    .rule         { width: 100%; }
     .manual-section { display: none; }
     header {
         padding: 0 1rem;

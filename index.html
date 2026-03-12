@@ -7,16 +7,20 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="theme-color" content="#0a0804">
     <meta name="description" content="ระบบประกาศเสียงอัตโนมัติ - Voice Alarm Pro">
+
+    <!-- FIX: อนุญาต autoplay สำหรับ GitHub Pages / HTTPS -->
+    <meta http-equiv="Permissions-Policy" content="autoplay=*">
+
     <title>Voice Alarm Pro</title>
 
-    <!-- Fonts loaded once via <link> — @import removed from CSS to avoid double-load -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
     <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<!-- FIX: lang="en-GB" forces 24-hour format on <input type="time"> across all browsers/OS -->
+<body lang="en-GB">
 
     <!-- Background Layers -->
     <div class="bg-layer" aria-hidden="true">
@@ -25,7 +29,6 @@
         <div class="bg-glow glow-2"></div>
     </div>
 
-    <!-- Header: implicit role="banner" — no need to declare -->
     <header>
         <div class="header-left">
             <div class="logo-mark" aria-hidden="true">
@@ -52,10 +55,8 @@
         </div>
     </header>
 
-    <!-- Main Container -->
     <div class="main-container">
 
-        <!-- aside: implicit role="complementary" — no need to declare -->
         <aside class="control-panel" aria-label="แผงควบคุม">
 
             <div class="panel-label">CONTROL</div>
@@ -70,6 +71,12 @@
                 <span id="powerText">START SYSTEM</span>
             </button>
 
+            <!-- FIX: เพิ่ม unlock hint — แสดงตอนยังไม่ได้ start -->
+            <div class="unlock-hint" id="unlockHint" role="status">
+                <i class="fas fa-info-circle" aria-hidden="true"></i>
+                กด START SYSTEM เพื่อเปิดใช้งานเสียง
+            </div>
+
             <div class="stats-grid" role="status" aria-label="สถิติระบบ">
                 <div class="stat-card">
                     <span class="stat-label">รายการทั้งหมด</span>
@@ -83,7 +90,6 @@
 
             <div class="volume-panel">
                 <div class="volume-row">
-                    <!-- <label> wrapping the text properly associates it with the input -->
                     <label class="volume-label" for="volumeSlider">
                         <i class="fas fa-volume-up" aria-hidden="true"></i> ระดับเสียง
                     </label>
@@ -109,7 +115,6 @@
 
         </aside>
 
-        <!-- main: implicit role="main" — no need to declare -->
         <main class="schedule-panel">
 
             <div class="panel-top">
@@ -119,7 +124,6 @@
                     <div class="next-countdown" id="nextCountdown">No active schedules</div>
                 </div>
 
-                <!-- aria-label added -->
                 <div class="action-bar" role="toolbar" aria-label="จัดการรายการตารางเวลา">
                     <button class="btn-add"
                             onclick="addSchedule()"
@@ -157,7 +161,7 @@
         </main>
     </div>
 
-    <!-- Modal: tabindex="-1" enables programmatic focus for focus-trap -->
+    <!-- Modal -->
     <div id="confirmModal"
          class="modal-overlay"
          role="dialog"
@@ -178,7 +182,6 @@
         </div>
     </div>
 
-    <!-- Hidden / Non-visual elements -->
     <audio id="mainAudioPlayer" preload="metadata" playsinline webkit-playsinline aria-hidden="true"></audio>
     <input type="file" id="importFile" accept=".json,application/json" style="display:none" aria-hidden="true" tabindex="-1">
 

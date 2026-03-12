@@ -1,15 +1,15 @@
 /**
- * Voice Alarm Pro v3.4 — Terminal Gold Edition
+ * Voice Alarm Pro v3.5 — GitHub Pages Edition
  *
- * Fixes applied vs v3.3:
- * - updateSystemUI now uses cached DOM.powerText (was querying DOM every call)
- * - checkAlarm: first.loop || 1 guard added (was passing raw undefined)
- * - state.nextSchedule removed (was declared but never read)
- * - fadeIn: volume capped with Math.min to prevent floating-point overshoot
- * - detectAudioPath: parallel Promise.all instead of sequential for-loop
- * - showModal: focus moves to confirm button on open (focus-trap)
- * - closeModal: focus returns to the element that triggered the modal
- * - powerBtn aria-pressed updated on toggle for screen readers
+ * Fixes vs v3.4:
+ * - detectAudioPath: ใช้ Audio probe แทน fetch HEAD (รองรับทุก server รวม GitHub Pages)
+ * - startSystem: สร้าง / resume AudioContext ก่อนทุกครั้ง (แก้ YouTube suspend)
+ * - startSystem: หยุด start ถ้า silent unlock fail (NotAllowedError)
+ * - playSound: resume AudioContext ก่อนทุก playback
+ * - playSound: เพิ่ม audio.load() บังคับ browser รับ src ใหม่
+ * - playSound: retry 1 ครั้งเมื่อ AbortError (ถูก interrupt จาก tab อื่น)
+ * - setupEventListeners: เพิ่ม pause / stalled handler
+ * - unlockHint: แสดง/ซ่อน hint แนะนำ user
  */
 
 // ─── Audio Assets ─────────────────────────────────────────────────────────────
@@ -18,21 +18,24 @@ const audioAssets = [
     { id: 'alarm', name: '🚨 เสียงเลิกงาน', file: 'endwork.mp3' }
 ];
 
+// ลำดับ path ที่จะทดสอบ
 const audioPaths = ['sounds/', './sounds/', '../sounds/', ''];
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let state = {
-    isRunning:          false,
-    schedules:          [],
-    audioBasePath:      '',
-    wakeLock:           null,
-    // NOTE: removed unused `nextSchedule` field
+    isRunning:           false,
+    schedules:           [],
+    audioBasePath:       '',
+    wakeLock:            null,
     currentFadeInterval: null,
     volumeChangeTimeout: null,
-    clockInterval:      null,
-    lastCheckMinute:    -1,
-    isAudioUnlocked:    false,
-    alarmQueue:         []
+    clockInterval:       null,
+    lastCheckMinute:     -1,
+    isAudioUnlocked:     false,
+    alarmQueue:          [],
+    audioCtx:            null,   // Web Audio API context
+    wasInterrupted:      false,  // ถูก interrupt จาก tab อื่นหรือไม่
+    retryCount:          0       // นับ retry เพื่อกัน infinite loop
 };
 
 // ─── DOM Cache ────────────────────────────────────────────────────────────────
@@ -43,17 +46,17 @@ const DOM = {
     volumeSlider:      null,
     volText:           null,
     powerBtn:          null,
-    powerText:         null,   // cached span#powerText — used in updateSystemUI
+    powerText:         null,
     statusBadge:       null,
     statusText:        null,
     scheduleContainer: null,
     manualBoard:       null,
     importFile:        null,
     nextScheduleEl:    null,
-    nextCountdownEl:   null
+    nextCountdownEl:   null,
+    unlockHint:        null
 };
 
-// Tracks which element opened the modal so focus can be restored on close
 let _modalTriggerEl = null;
 
 // ─── Initialization ───────────────────────────────────────────────────────────
@@ -74,7 +77,7 @@ function cacheDOMElements() {
     DOM.volumeSlider      = document.getElementById('volumeSlider');
     DOM.volText           = document.getElementById('volText');
     DOM.powerBtn          = document.getElementById('powerBtn');
-    DOM.powerText         = document.getElementById('powerText');   // FIX: now used in updateSystemUI
+    DOM.powerText         = document.getElementById('powerText');
     DOM.statusBadge       = document.getElementById('statusBadge');
     DOM.statusText        = document.getElementById('statusText');
     DOM.scheduleContainer = document.getElementById('scheduleContainer');
@@ -82,6 +85,7 @@ function cacheDOMElements() {
     DOM.importFile        = document.getElementById('importFile');
     DOM.nextScheduleEl    = document.getElementById('nextSchedule');
     DOM.nextCountdownEl   = document.getElementById('nextCountdown');
+    DOM.unlockHint        = document.getElementById('unlockHint');
 }
 
 async function initializeApp() {
@@ -95,8 +99,8 @@ async function initializeApp() {
         loadSavedVolume();
         startClock();
         setupVisibilityHandler();
-        console.log('✅ Voice Alarm Pro v3.4 initialized');
-        console.log('📁 Audio base path:', state.audioBasePath || '(root)');
+        console.log('✅ Voice Alarm Pro v3.5 initialized');
+        console.log('📁 Audio base path:', `"${state.audioBasePath}"`);
     } catch (error) {
         console.error('❌ Initialization error:', error);
         showToast('เกิดข้อผิดพลาดในการเริ่มต้นระบบ', 'error');
@@ -107,10 +111,49 @@ function setupEventListeners() {
     if (DOM.importFile) {
         DOM.importFile.addEventListener('change', handleImport);
     }
+
     if (DOM.audioPlayer) {
         DOM.audioPlayer.addEventListener('error',  handleAudioError);
         DOM.audioPlayer.addEventListener('ended',  handleAudioEnded);
+
+        // FIX: ตรวจจับเมื่อ browser/OS ตัดเสียง (เช่น YouTube เล่นในอีก tab)
+        DOM.audioPlayer.addEventListener('pause', () => {
+            if (state.isRunning && !DOM.audioPlayer.ended && DOM.audioPlayer.currentSrc) {
+                state.wasInterrupted = true;
+                console.warn('⚠️ Audio interrupted by external source');
+            }
+        });
+
+        // FIX: ถ้าเสียงค้าง (stalled) ให้ reload และ play ใหม่
+        DOM.audioPlayer.addEventListener('stalled', () => {
+            console.warn('⚠️ Audio stalled — attempting reload');
+            const currentSrc = DOM.audioPlayer.currentSrc;
+            if (currentSrc && state.isRunning) {
+                setTimeout(() => {
+                    DOM.audioPlayer.load();
+                    DOM.audioPlayer.play().catch(e =>
+                        console.error('Stalled recovery failed:', e)
+                    );
+                }, 300);
+            }
+        });
     }
+
+    // FIX: resume AudioContext เมื่อ user กลับมาที่ tab
+    document.addEventListener('visibilitychange', async () => {
+        if (!document.hidden && state.isRunning) {
+            if (state.audioCtx && state.audioCtx.state === 'suspended') {
+                try {
+                    await state.audioCtx.resume();
+                    console.log('🔊 AudioContext resumed on tab focus');
+                } catch(e) {
+                    console.warn('AudioContext resume failed:', e);
+                }
+            }
+            updateClock();
+        }
+    });
+
     window.addEventListener('beforeunload', (e) => {
         if (state.clockInterval) clearInterval(state.clockInterval);
         clearFadeInterval();
@@ -124,9 +167,7 @@ function setupEventListeners() {
 }
 
 function setupVisibilityHandler() {
-    document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && state.isRunning) updateClock();
-    });
+    // ย้ายเข้า setupEventListeners แล้ว — คงไว้เพื่อ backward compat
 }
 
 function handleAudioError(e) {
@@ -136,7 +177,9 @@ function handleAudioError(e) {
         3: 'ไม่สามารถ decode ไฟล์เสียงได้',
         4: 'รูปแบบไฟล์เสียงไม่รองรับ'
     };
-    showToast(codes[e.target.error?.code] || 'ไม่สามารถเล่นเสียงได้', 'error');
+    const msg = codes[e.target.error?.code] || 'ไม่สามารถเล่นเสียงได้';
+    console.error('Audio error:', msg, e.target.error);
+    showToast(msg, 'error');
     processAlarmQueue();
 }
 
@@ -150,9 +193,9 @@ function loadSavedVolume() {
         if (saved !== null) {
             const vol = Math.max(0, Math.min(1, parseFloat(saved)));
             if (!isNaN(vol)) {
-                DOM.volumeSlider.value   = vol;
-                DOM.audioPlayer.volume   = vol;
-                DOM.volText.innerText    = Math.round(vol * 100) + '%';
+                DOM.volumeSlider.value = vol;
+                DOM.audioPlayer.volume = vol;
+                DOM.volText.innerText  = Math.round(vol * 100) + '%';
             }
         }
     } catch (e) {
@@ -160,7 +203,7 @@ function loadSavedVolume() {
     }
 }
 
-// ─── Audio Path Detection (FIX: parallel, not sequential) ────────────────────
+// ─── Audio Path Detection ─────────────────────────────────────────────────────
 async function detectAudioPath() {
     if (location.protocol === 'file:') {
         state.audioBasePath = 'sounds/';
@@ -170,19 +213,41 @@ async function detectAudioPath() {
 
     const testFile = audioAssets[0].file;
 
-    // FIX: run all checks concurrently with Promise.all instead of await in a loop
+    // FIX: ใช้ Audio element probe แทน fetch HEAD
+    // fetch HEAD fail แบบ silent บน GitHub Pages CDN และบาง server
+    const probeAudio = (path) => new Promise((resolve) => {
+        const a       = new Audio();
+        const timeout = setTimeout(() => { a.src = ''; resolve(false); }, 4000);
+
+        a.oncanplaythrough = () => {
+            clearTimeout(timeout);
+            a.src = '';
+            resolve(true);
+        };
+        a.onerror = () => {
+            clearTimeout(timeout);
+            resolve(false);
+        };
+
+        a.preload = 'metadata'; // โหลดแค่ metadata ไม่โหลดทั้งไฟล์
+        a.src     = path + testFile + '?_=' + Date.now(); // cache-bust
+    });
+
     const results = await Promise.all(
-        audioPaths.map(path =>
-            fetch(path + testFile, { method: 'HEAD', cache: 'no-cache' })
-                .then(r => (r.ok ? path : null))
-                .catch(() => null)
-        )
+        audioPaths.map(path => probeAudio(path).then(ok => ok ? path : null))
     );
 
-    // Pick the first valid path (preserving priority order)
     const found = results.find(r => r !== null);
-    state.audioBasePath = (found !== undefined && found !== null) ? found : '';
-    console.log('📁 Audio path:', state.audioBasePath || '(root)');
+
+    if (found !== undefined && found !== null) {
+        state.audioBasePath = found;
+    } else {
+        // fallback — ลองใช้ sounds/ แม้ probe จะ fail (อาจเป็น browser restriction)
+        state.audioBasePath = 'sounds/';
+        console.warn('⚠️ Audio probe failed for all paths — fallback to sounds/');
+    }
+
+    console.log('📁 Audio path resolved:', `"${state.audioBasePath}"`);
 }
 
 // ─── Audio Logic ──────────────────────────────────────────────────────────────
@@ -193,23 +258,35 @@ async function playSound(soundId, loops = 1) {
     }
 
     const asset = audioAssets.find(a => a.id === soundId);
-    if (!asset) {
-        showToast('ไม่พบไฟล์เสียง', 'error');
-        return;
-    }
+    if (!asset) { showToast('ไม่พบไฟล์เสียง', 'error'); return; }
 
-    const safeLoops = Math.max(1, Math.min(10, parseInt(loops) || 1));
-    const url = state.audioBasePath + asset.file;
+    const safeLoops    = Math.max(1, Math.min(10, parseInt(loops) || 1));
+    const url          = state.audioBasePath + asset.file;
+    const targetVolume = parseFloat(DOM.volumeSlider.value);
 
     try {
+        // FIX: Resume AudioContext ก่อนทุก playback
+        // แก้ปัญหา "เสียงไม่ดัง" เมื่อ YouTube หรือ media อื่น suspend context
+        if (state.audioCtx) {
+            if (state.audioCtx.state === 'suspended') {
+                await state.audioCtx.resume();
+                console.log('🔊 AudioContext resumed before playSound');
+            }
+        }
+
         await fadeOutAndStop();
+        state.wasInterrupted = false;
+        state.retryCount     = 0;
 
         DOM.audioPlayer.src    = url;
         DOM.audioPlayer.loop   = false;
         DOM.audioPlayer.volume = 0;
 
+        // FIX: load() บังคับ browser โหลด src ใหม่
+        // แก้ปัญหาเล่นไม่ออกบางเครื่องที่ src เหมือนเดิม
+        DOM.audioPlayer.load();
+
         let playedCount = 0;
-        const targetVolume = parseFloat(DOM.volumeSlider.value);
 
         const onEnded = async () => {
             playedCount++;
@@ -241,15 +318,33 @@ async function playSound(soundId, loops = 1) {
         updateUI();
 
     } catch (err) {
-        console.error('Play error:', err);
+        console.error('Play error:', err.name, err.message);
+
         if (err.name === 'NotAllowedError') {
-            showToast('กรุณากด START SYSTEM อีกครั้ง', 'error');
-            toggleSystem(false);
+            // Autoplay blocked — user ต้อง interact ใหม่
+            showToast('⚠️ Browser บล็อกเสียง — กด STOP แล้ว START ใหม่', 'error');
+            state.isAudioUnlocked = false;
+            await toggleSystem(false);
+
+        } else if (err.name === 'AbortError') {
+            // FIX: AbortError เกิดเมื่อ tab อื่น (YouTube) interrupt
+            // retry 1 ครั้งหลัง 600ms
+            if (state.retryCount < 1) {
+                state.retryCount++;
+                console.warn(`⚠️ AbortError — retry #${state.retryCount} in 600ms`);
+                setTimeout(() => playSound(soundId, loops), 600);
+                return;
+            } else {
+                showToast('เสียงถูกขัดจังหวะจากแอปอื่น — กรุณาลองใหม่', 'error');
+            }
+
         } else if (err.name === 'NotSupportedError') {
-            showToast('รูปแบบไฟล์เสียงไม่รองรับ', 'error');
+            showToast('รูปแบบไฟล์เสียงไม่รองรับ (.mp3)', 'error');
+
         } else {
-            showToast('ไม่สามารถเล่นเสียงได้: ' + (err.message || 'Unknown error'), 'error');
+            showToast('ไม่สามารถเล่นเสียงได้: ' + (err.message || err.name), 'error');
         }
+
         processAlarmQueue();
     }
 }
@@ -274,7 +369,6 @@ function fadeIn(targetVolume) {
     state.currentFadeInterval = setInterval(() => {
         if (DOM.audioPlayer.paused) { clearFadeInterval(); return; }
         current += step;
-        // FIX: Math.min prevents floating-point overshoot past targetVolume
         DOM.audioPlayer.volume = Math.min(current, targetVolume);
         if (current >= targetVolume) clearFadeInterval();
     }, 50);
@@ -334,7 +428,6 @@ function handleVolumeChange(val) {
     }, 500);
 }
 
-// Legacy alias
 function setVolume(val) { handleVolumeChange(val); }
 
 // ─── System Control ───────────────────────────────────────────────────────────
@@ -354,36 +447,65 @@ async function toggleSystem(forceState) {
 }
 
 async function startSystem() {
-    // Unlock audio context on first user gesture
+    // FIX: สร้าง / resume AudioContext ก่อนเสมอ
+    // แก้ปัญหา "เสียงไม่ดัง" เมื่อ YouTube หรือ media อื่น suspend context
+    try {
+        if (!state.audioCtx) {
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            if (AudioContext) {
+                state.audioCtx = new AudioContext();
+                console.log('🎧 AudioContext created, state:', state.audioCtx.state);
+            }
+        }
+        if (state.audioCtx && state.audioCtx.state === 'suspended') {
+            await state.audioCtx.resume();
+            console.log('🔊 AudioContext resumed');
+        }
+    } catch(e) {
+        console.warn('AudioContext init failed:', e);
+    }
+
+    // FIX: Unlock autoplay ด้วย silent audio ใน user gesture context
+    // ถ้า fail = browser ยังไม่ยอม → หยุดไม่ start ระบบ
     if (!state.isAudioUnlocked) {
         const silent = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
-        DOM.audioPlayer.src = silent;
         try {
+            DOM.audioPlayer.src    = silent;
+            DOM.audioPlayer.volume = 0;
             await DOM.audioPlayer.play();
-            await DOM.audioPlayer.pause();
-            state.isAudioUnlocked = true;
+            DOM.audioPlayer.pause();
+            DOM.audioPlayer.src    = '';
+            DOM.audioPlayer.volume = parseFloat(DOM.volumeSlider.value);
+            state.isAudioUnlocked  = true;
+            console.log('🔓 Autoplay unlocked successfully');
         } catch (e) {
-            console.warn('Audio unlock failed, will retry on first sound:', e);
+            console.error('Silent unlock failed:', e.name, e.message);
+
+            if (e.name === 'NotAllowedError') {
+                // FIX: หยุด start ถ้า browser บล็อก
+                showToast('⚠️ กรุณากดปุ่ม START อีกครั้ง (Browser ต้องการยืนยัน)', 'error');
+                state.isRunning = false;
+                return;
+            }
+            // error อื่น (เช่น NotSupportedError บน silent data URI) — ยังไปต่อได้
+            console.warn('Non-blocking unlock error, continuing...');
         }
     }
 
     updateSystemUI(true);
     await acquireWakeLock();
-    showToast('✅ ระบบทำงานแล้ว', 'success');
+    showToast('✅ ระบบทำงานแล้ว — เสียงพร้อมใช้งาน', 'success');
 }
 
 async function stopSystem() {
     updateSystemUI(false);
-    state.alarmQueue = [];
+    state.alarmQueue     = [];
+    state.wasInterrupted = false;
     await fadeOutAndStop();
     await releaseWakeLock();
     showToast('⏸️ ระบบหยุดทำงาน');
 }
 
-/**
- * FIX: Uses cached DOM.powerText instead of querying with .querySelector() each call.
- * Also updates aria-pressed for screen reader state announcement.
- */
 function updateSystemUI(isActive) {
     if (!DOM.powerBtn || !DOM.statusBadge || !DOM.statusText || !DOM.powerText) return;
 
@@ -393,12 +515,14 @@ function updateSystemUI(isActive) {
         DOM.statusBadge.classList.add('active');
         DOM.statusText.innerText = 'ONLINE';
         DOM.powerText.innerText  = 'STOP SYSTEM';
+        if (DOM.unlockHint) DOM.unlockHint.style.display = 'none';
     } else {
         DOM.powerBtn.classList.remove('active');
         DOM.powerBtn.setAttribute('aria-pressed', 'false');
         DOM.statusBadge.classList.remove('active');
         DOM.statusText.innerText = 'STANDBY';
         DOM.powerText.innerText  = 'START SYSTEM';
+        if (DOM.unlockHint) DOM.unlockHint.style.display = 'flex';
     }
 }
 
@@ -406,10 +530,16 @@ async function acquireWakeLock() {
     if ('wakeLock' in navigator) {
         try {
             state.wakeLock = await navigator.wakeLock.request('screen');
-            state.wakeLock.addEventListener('release', () => console.log('⚠️ Wake Lock released'));
+            state.wakeLock.addEventListener('release', () => {
+                console.log('⚠️ Wake Lock released by browser');
+                // ลอง re-acquire ถ้าระบบยังทำงานอยู่
+                if (state.isRunning) {
+                    setTimeout(acquireWakeLock, 1000);
+                }
+            });
             console.log('🔒 Wake Lock acquired');
         } catch (err) {
-            console.warn('Wake Lock not available:', err);
+            console.warn('Wake Lock not available:', err.message);
         }
     }
 }
@@ -433,11 +563,22 @@ function startClock() {
     state.clockInterval = setInterval(updateClock, 1000);
 }
 
+/**
+ * Format time as HH:MM:SS in 24-hour format
+ * ไม่พึ่ง locale เพื่อกัน AM/PM ทุก OS/browser
+ */
+function format24h(date) {
+    const h = String(date.getHours()).padStart(2, '0');
+    const m = String(date.getMinutes()).padStart(2, '0');
+    const s = String(date.getSeconds()).padStart(2, '0');
+    return `${h}:${m}:${s}`;
+}
+
 function updateClock() {
     try {
         const now = new Date();
 
-        DOM.clockEl.innerText = now.toLocaleTimeString('th-TH', { hour12: false });
+        DOM.clockEl.innerText = format24h(now);
         DOM.dateEl.innerText  = now.toLocaleDateString('th-TH', {
             weekday: 'long', day: 'numeric', month: 'short', year: 'numeric'
         });
@@ -466,6 +607,8 @@ function checkAlarm(now) {
         );
         if (!matches.length) return;
 
+        console.log(`🔔 Alarm triggered: ${timeStr}, ${matches.length} match(es)`);
+
         const [first, ...rest] = matches;
 
         state.alarmQueue = rest.map(s => ({
@@ -473,7 +616,6 @@ function checkAlarm(now) {
             loops:   Math.max(1, Math.min(10, s.loop || 1))
         }));
 
-        // FIX: guard against first.loop being undefined/null
         playSound(first.soundId, first.loop || 1);
 
         if (rest.length > 0) console.log(`ℹ️ ${rest.length} alarm(s) queued`);
@@ -489,9 +631,9 @@ function updateNextEventCountdown(now) {
 
         const active = state.schedules.filter(s => s.enabled);
         if (!active.length) {
-            DOM.nextScheduleEl.innerText         = '--:--';
-            DOM.nextCountdownEl.innerText        = 'ไม่มีรายการที่เปิดใช้งาน';
-            DOM.nextCountdownEl.style.color      = 'var(--text-2)';
+            DOM.nextScheduleEl.innerText    = '--:--';
+            DOM.nextCountdownEl.innerText   = 'ไม่มีรายการที่เปิดใช้งาน';
+            DOM.nextCountdownEl.style.color = 'var(--text-2)';
             return;
         }
 
@@ -601,6 +743,7 @@ function createScheduleElement(sch, index) {
         <div class="sch-time">
             <input type="time"
                    value="${escapeHtml(sch.time)}"
+                   lang="en-GB"
                    onchange="updateSch(${index},'time',this.value)"
                    aria-label="เวลาเล่นเสียง">
         </div>
@@ -737,7 +880,6 @@ function askDelete(index) {
         saveAndRender();
         showToast('🗑️ ลบรายการแล้ว');
     };
-    // FIX: track trigger for focus restore
     _modalTriggerEl = document.activeElement;
     showModal('ลบรายการนี้?', `ต้องการลบเวลา ${sch.time} (${asset?.name || sch.soundId}) ใช่หรือไม่?`);
 }
@@ -759,10 +901,6 @@ function confirmReset() {
     showModal('⚠️ ล้างข้อมูลทั้งหมด', 'ข้อมูลทั้งหมดจะถูกลบและไม่สามารถกู้คืนได้ ต้องการดำเนินการต่อหรือไม่?');
 }
 
-/**
- * FIX: Moves focus to the confirm button when modal opens (focus-trap start).
- * ESC key also closes the modal.
- */
 function showModal(title, msg) {
     const modal      = document.getElementById('confirmModal');
     const modalTitle = document.getElementById('modalTitle');
@@ -774,30 +912,23 @@ function showModal(title, msg) {
     modalMsg.innerText   = msg;
     modal.classList.add('show');
 
-    // Replace button to remove stale event listeners
     const newBtn = confirmBtn.cloneNode(true);
     confirmBtn.parentNode.replaceChild(newBtn, confirmBtn);
     newBtn.onclick = () => { if (pendingAction) pendingAction(); closeModal(); };
 
-    // FIX: Move focus to confirm button for keyboard/screen reader users
     setTimeout(() => newBtn.focus(), 50);
 
-    // Close on ESC
     const escHandler = (e) => {
         if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', escHandler); }
     };
     document.addEventListener('keydown', escHandler);
 }
 
-/**
- * FIX: Restores focus to the element that triggered the modal.
- */
 function closeModal() {
     const modal = document.getElementById('confirmModal');
     if (modal) modal.classList.remove('show');
     pendingAction = null;
 
-    // FIX: Return focus to trigger element
     if (_modalTriggerEl && typeof _modalTriggerEl.focus === 'function') {
         _modalTriggerEl.focus();
     }
@@ -836,17 +967,16 @@ function loadSettings() {
     }
 }
 
-/** Shared sanitizer used by both loadSettings and handleImport */
 function sanitizeSchedule(s) {
     return {
         id:      (typeof s.id === 'string' && s.id)
                     ? s.id
                     : `sch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-        time:    validateTime(s.time)                   ? s.time         : '08:00',
-        soundId: validateSoundId(s.soundId)             ? s.soundId      : audioAssets[0].id,
-        days:    validateDays(s.days)                   ? s.days         : [1,2,3,4,5],
-        enabled: typeof s.enabled === 'boolean'         ? s.enabled      : true,
-        loop:    validateLoop(s.loop)                   ? s.loop         : 1
+        time:    validateTime(s.time)         ? s.time         : '08:00',
+        soundId: validateSoundId(s.soundId)   ? s.soundId      : audioAssets[0].id,
+        days:    validateDays(s.days)         ? s.days         : [1,2,3,4,5],
+        enabled: typeof s.enabled === 'boolean' ? s.enabled    : true,
+        loop:    validateLoop(s.loop)         ? s.loop         : 1
     };
 }
 
@@ -879,8 +1009,8 @@ function showToast(msg, type = 'normal') {
         const colors = { error: 'var(--red)', warning: 'var(--gold)', success: 'var(--green)' };
 
         const toast = document.createElement('div');
-        toast.className   = 'toast';
-        toast.innerHTML   = `<i class="fas ${icons[type] || icons.normal}" aria-hidden="true"></i><span>${escapeHtml(msg)}</span>`;
+        toast.className = 'toast';
+        toast.innerHTML = `<i class="fas ${icons[type] || icons.normal}" aria-hidden="true"></i><span>${escapeHtml(msg)}</span>`;
         toast.setAttribute('role', 'alert');
         toast.setAttribute('aria-live', 'assertive');
 
@@ -890,7 +1020,7 @@ function showToast(msg, type = 'normal') {
         }
 
         document.body.appendChild(toast);
-        toastTimeout = setTimeout(() => dismissToast(toast), 3000);
+        toastTimeout = setTimeout(() => dismissToast(toast), 3500);
         toast.addEventListener('click', () => dismissToast(toast));
 
     } catch (e) {
@@ -908,7 +1038,7 @@ function dismissToast(toast) {
 function exportData() {
     try {
         const payload = {
-            version:    '3.4',
+            version:    '3.5',
             exportDate: new Date().toISOString(),
             schedules:  state.schedules,
             settings:   { volume: parseFloat(DOM.volumeSlider.value) }
@@ -956,7 +1086,6 @@ function handleImport(e) {
                 list = imported;
             } else if (imported.schedules && Array.isArray(imported.schedules)) {
                 list = imported.schedules;
-                // Restore saved volume if present
                 if (imported.settings?.volume !== undefined) {
                     const v = Math.max(0, Math.min(1, parseFloat(imported.settings.volume)));
                     if (!isNaN(v)) {
@@ -970,7 +1099,6 @@ function handleImport(e) {
                 throw new Error('Invalid file format');
             }
 
-            // FIX: reuse shared sanitizeSchedule helper
             state.schedules = list
                 .filter(s => s && typeof s === 'object')
                 .map(sanitizeSchedule);
